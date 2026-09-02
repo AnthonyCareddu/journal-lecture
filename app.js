@@ -143,7 +143,7 @@ async function bootApp(){
   else { $('#loading').classList.remove('hide'); }
 
   registerSW();
-  setOffline(!navigator.onLine);
+  updateOfflineUi();
 
   try{
     const b = await api('bootstrap');
@@ -154,7 +154,7 @@ async function bootApp(){
     if(e.message === 'unauthorized'){ store.session = null; return showAuth(); }
     if(!cached){ $('#loading').innerHTML = '<p class="muted" style="text-align:center">Hors ligne et aucune donnée en cache.<br>Reconnecte-toi une fois en ligne.</p>'; return; }
     toast('Hors ligne — données en cache', true);
-    setOffline(true);
+    updateOfflineUi();
   }
 }
 function initFromBoot(){
@@ -172,12 +172,18 @@ function refresh(b){ if(b) setBoot(b); renderActif(); }
 function renderActif(){ const v = document.querySelector('nav.bottom button.on'); if(v) go(v.dataset.v); }
 
 /* -------------------------------------------------------- OFFLINE / QUEUE -- */
-function setOffline(off){ $('#offline-bar').hidden = !off; }
 function updateOfflineUi(){
   const n = store.queue.length;
   const bar = $('#offline-bar');
-  if(n){ bar.hidden = false; bar.textContent = n + ' séance(s) en attente de synchronisation'; }
-  else { setOffline(!navigator.onLine); }
+  if(!navigator.onLine){
+    bar.hidden = false;
+    bar.textContent = 'Hors ligne — tes séances seront synchronisées au retour du réseau';
+  } else if(n){
+    bar.hidden = false;
+    bar.textContent = n + ' séance(s) en attente de synchronisation…';
+  } else {
+    bar.hidden = true;
+  }
 }
 async function flushQueue(){
   const q = store.queue;
@@ -639,8 +645,8 @@ function registerSW(){
   }).catch(() => {});
 }
 
-window.addEventListener('online', () => { setOffline(false); flushQueue(); });
-window.addEventListener('offline', () => setOffline(true));
+window.addEventListener('online', () => { updateOfflineUi(); flushQueue(); });
+window.addEventListener('offline', updateOfflineUi);
 
 document.addEventListener('DOMContentLoaded', () => {
   wireSettings();
