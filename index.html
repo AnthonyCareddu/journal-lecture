@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Journal de Lecture</title>
+
+<meta name="theme-color" content="#8a3a42">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Lecture">
+
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self' https://accounts.google.com;
+  style-src 'self' 'unsafe-inline' https://accounts.google.com https://fonts.googleapis.com;
+  font-src 'self' https://fonts.gstatic.com;
+  img-src 'self' data: https://*.googleusercontent.com https://*.google.com;
+  connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com https://oauth2.googleapis.com https://*.googleusercontent.com;
+  frame-src https://accounts.google.com;
+  base-uri 'self'; form-action 'self';
+">
+
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ===== CONNEXION ===== -->
+<div id="auth" class="auth" hidden>
+  <div class="auth-card">
+    <img src="icons/icon-192.png" alt="" width="72" height="72">
+    <h1>Journal de Lecture</h1>
+    <p class="auth-sub">Connexion réservée à ton compte Google.</p>
+    <div id="gbtn"></div>
+    <button id="gbtn-fallback" class="btn" hidden>Se connecter avec Google</button>
+    <p id="auth-error" class="auth-error" role="alert" hidden></p>
+    <button id="auth-settings" class="linklike" type="button">Réglages avancés</button>
+  </div>
+</div>
+
+<!-- ===== APPLICATION ===== -->
+<div id="app" hidden>
+  <div class="app">
+    <header class="top">
+      <h1 id="title">Journal de Lecture</h1>
+      <button class="btn ghost sm" onclick="openReglages()" aria-label="Réglages">⚙️</button>
+    </header>
+
+    <div id="loading" class="view"><div class="spin"></div><p class="muted" style="text-align:center">Chargement…</p></div>
+
+    <!-- CHRONO -->
+    <section id="v-chrono" class="view hide">
+      <div id="chrono-banner"></div>
+      <div class="card pad">
+        <div class="chrono-book">
+          <div class="lbl">Livre en cours</div>
+          <button class="name" onclick="choisirLivre()"><span id="chrono-livre">—</span> <span class="muted">▾</span></button>
+        </div>
+        <div class="dial"><span id="dial">00</span><small>:</small><span id="dial2">00</span></div>
+        <div id="chrono-state" class="row" style="justify-content:center;font-size:12px;color:var(--ink-soft);min-height:16px"></div>
+        <div class="chrono-actions" id="chrono-actions"></div>
+      </div>
+      <button class="btn sec" style="margin-top:14px" onclick="ajoutManuel()">＋ Ajouter une session manuellement</button>
+      <div id="chrono-jour" style="margin-top:16px"></div>
+    </section>
+
+    <!-- MOIS -->
+    <section id="v-mois" class="view hide">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <button class="btn sec sm" onclick="moisNav(-1)">‹</button>
+        <h2 id="mois-titre"></h2>
+        <button class="btn sec sm" onclick="moisNav(1)">›</button>
+      </div>
+      <div class="cal-head"><div>L</div><div>M</div><div>M</div><div>J</div><div>V</div><div>S</div><div>D</div></div>
+      <div class="cal" id="cal"></div>
+      <div id="mois-resume" class="kpis" style="margin-top:14px"></div>
+      <div class="legend">
+        <span><i style="background:var(--violet)"></i>≥ <span class="s-v"></span> min</span>
+        <span><i style="background:var(--vert)"></i><span class="s-g"></span>–<span class="s-g2"></span></span>
+        <span><i style="background:var(--jaune)"></i><span class="s-j"></span>–<span class="s-j2b"></span></span>
+        <span><i style="background:var(--rouge)"></i>1–<span class="s-j2"></span></span>
+        <span><i style="background:var(--zero)"></i>0</span>
+      </div>
+    </section>
+
+    <!-- STATS -->
+    <section id="v-stats" class="view hide">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <button class="btn sec sm" onclick="statsNav(-1)">‹</button>
+        <h2 id="stats-annee"></h2>
+        <button class="btn sec sm" onclick="statsNav(1)">›</button>
+      </div>
+      <div id="stats-body"></div>
+    </section>
+
+    <!-- LIVRES -->
+    <section id="v-livres" class="view hide">
+      <input id="livres-q" placeholder="Rechercher un livre…" oninput="renderLivres()" style="margin-bottom:10px">
+      <div class="seg" id="livres-filtres" style="margin-bottom:8px"></div>
+      <div class="seg" style="margin-bottom:12px">
+        <button class="on" data-tri="recent" onclick="setTri(this)">Récents</button>
+        <button data-tri="temps" onclick="setTri(this)">Temps</button>
+        <button data-tri="titre" onclick="setTri(this)">A–Z</button>
+      </div>
+      <button class="btn sec" style="margin-bottom:12px" onclick="editLivre(null)">＋ Nouveau livre</button>
+      <div class="card" id="livres-list"></div>
+    </section>
+
+    <!-- JOURNAL -->
+    <section id="v-journal" class="view hide">
+      <button class="btn sec" style="margin-bottom:12px" onclick="ajoutManuel()">＋ Ajouter une session</button>
+      <div id="journal-list"></div>
+    </section>
+  </div>
+
+  <nav class="bottom">
+    <button data-v="chrono" onclick="go('chrono')"><span class="i">⏱️</span>Chrono</button>
+    <button data-v="mois"   onclick="go('mois')"><span class="i">📅</span>Mois</button>
+    <button data-v="stats"  onclick="go('stats')"><span class="i">📊</span>Stats</button>
+    <button data-v="livres" onclick="go('livres')"><span class="i">📚</span>Livres</button>
+    <button data-v="journal" onclick="go('journal')"><span class="i">📖</span>Journal</button>
+  </nav>
+</div>
+
+<div id="offline-bar" class="offline-bar" hidden>Hors ligne — tes séances seront synchronisées au retour du réseau</div>
+<div id="toast" class="toast"></div>
+<div id="modal-root"></div>
+
+<dialog id="settings">
+  <div class="settings-body">
+    <h2>Réglages avancés</h2>
+    <div class="field"><label>URL de l'API (…/exec)</label><input id="s-api" type="url" placeholder="https://script.google.com/macros/s/…/exec"></div>
+    <div class="field"><label>ID client Google</label><input id="s-client" type="text" placeholder="…apps.googleusercontent.com"></div>
+    <p class="muted small">Laisse vide pour utiliser les valeurs par défaut.</p>
+    <div id="s-status" class="muted small"></div>
+    <div class="settings-actions">
+      <button type="button" id="s-save" class="btn sm">Enregistrer</button>
+      <button type="button" id="s-logout" class="btn sec sm">Se déconnecter</button>
+      <button type="button" id="s-close" class="btn ghost sm">Fermer</button>
+    </div>
+  </div>
+</dialog>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>

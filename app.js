@@ -1,0 +1,643 @@
+'use strict';
+/* Journal de Lecture — PWA
+ * Coquille statique (GitHub Pages) -> API Apps Script (doPost) -> Google Sheet.
+ * CONFIG par défaut ci-dessous ; surchargeable via ⚙️ Réglages avancés.
+ */
+const DEFAULTS = {
+  API_URL: 'https://script.google.com/macros/s/AKfycbzVItBQYZseU6T_hIHeaXn21vRCKzWT3k43fq4YE30Tid4nMyoMbvM6h5aB1dAJOUTYXA/exec',
+  GOOGLE_CLIENT_ID: '291608936405-ddbgkq5hchqu42n3k92ajo95guokt6vn.apps.googleusercontent.com',
+  SHEET_URL: 'https://docs.google.com/spreadsheets/d/1uCvIGRItUcnlIsNZSl7UXlFm2N-h5_V3lt9u3O2cgyo/edit',
+};
+
+/* ------------------------------------------------------------------ store -- */
+const store = {
+  get apiUrl(){ return localStorage.getItem('jdl.apiUrl') || DEFAULTS.API_URL; },
+  set apiUrl(v){ v ? localStorage.setItem('jdl.apiUrl', v) : localStorage.removeItem('jdl.apiUrl'); },
+  get clientId(){ return localStorage.getItem('jdl.clientId') || DEFAULTS.GOOGLE_CLIENT_ID; },
+  set clientId(v){ v ? localStorage.setItem('jdl.clientId', v) : localStorage.removeItem('jdl.clientId'); },
+  get session(){ try{ return JSON.parse(localStorage.getItem('jdl.session') || 'null'); }catch(e){ return null; } },
+  set session(v){ v ? localStorage.setItem('jdl.session', JSON.stringify(v)) : localStorage.removeItem('jdl.session'); },
+  get queue(){ try{ return JSON.parse(localStorage.getItem('jdl.queue') || '[]'); }catch(e){ return []; } },
+  set queue(v){ localStorage.setItem('jdl.queue', JSON.stringify(v)); },
+  get bootCache(){ try{ return JSON.parse(localStorage.getItem('jdl.boot') || 'null'); }catch(e){ return null; } },
+  set bootCache(v){ try{ localStorage.setItem('jdl.boot', JSON.stringify(v)); }catch(e){} },
+  get running(){ try{ return JSON.parse(localStorage.getItem('jdl.running') || 'null'); }catch(e){ return null; } },
+  set running(v){ v ? localStorage.setItem('jdl.running', JSON.stringify(v)) : localStorage.removeItem('jdl.running'); },
+};
+
+/* -------------------------------------------------------------------- API -- */
+class ApiError extends Error {}
+
+async function rawPost(payload){
+  let resp;
+  try{
+    resp = await fetch(store.apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // simple request => pas de préflight CORS
+      body: JSON.stringify(payload),
+      redirect: 'follow',
+    });
+  }catch(e){ throw new ApiError('network'); }
+  let json;
+  try{ json = await resp.json(); }catch(e){ throw new ApiError('bad_response'); }
+  if(!json.ok) throw new ApiError(json.error || 'error');
+  return json.data;
+}
+
+async function api(action, payload){
+  const s = store.session;
+  if(!s || s.exp < Date.now()) throw new ApiError('unauthorized');
+  return rawPost({ action: action, token: s.token, payload: payload || {} });
+}
+async function apiLogin(googleToken){ return rawPost({ action: 'login', googleToken: googleToken }); }
+
+/* écriture avec file d'attente hors ligne */
+async function mut(action, payload){
+  try{
+    const r = await api(action, payload);
+    if(r && r.bootstrap) setBoot(r.bootstrap);
+    return r || {};
+  }catch(e){
+    if(e.message === 'network' || e.message === 'unauthorized'){
+      const q = store.queue; q.push({ action: action, payload: payload }); store.queue = q;
+      updateOfflineUi();
+      if(e.message === 'unauthorized') scheduleReauth();
+      return { offline: true };
+    }
+    throw e;
+  }
+}
+
+/* ------------------------------------------------------------------- AUTH -- */
+const $ = (s, r=document) => r.querySelector(s);
+
+function showAuth(msg){
+  $('#app').hidden = true;
+  $('#auth').hidden = false;
+  if(msg){ const el = $('#auth-error'); el.textContent = msg; el.hidden = false; }
+  initGoogle();
+}
+function authMessage(e){
+  return ({
+    email_not_allowed: "Ce compte Google n'est pas autorisé.",
+    google_token_invalid: 'Jeton Google invalide, réessaie.',
+    network: 'Pas de connexion au serveur.',
+    bad_response: "Réponse inattendue du serveur (vérifie l'URL de l'API dans les réglages).",
+  })[e && e.message] || 'Connexion impossible : ' + ((e && e.message) || 'erreur');
+}
+
+let gisReady = false;
+function initGoogle(){
+  if(!(window.google && google.accounts && google.accounts.id)){ return void setTimeout(initGoogle, 250); }
+  if(gisReady){ try{ google.accounts.id.prompt(); }catch(e){} return; }
+  gisReady = true;
+  google.accounts.id.initialize({
+    client_id: store.clientId,
+    callback: handleCredential,
+    auto_select: true,
+    cancel_on_tap_outside: false,
+  });
+  try{
+    google.accounts.id.renderButton($('#gbtn'), { theme: 'filled_black', size: 'large', shape: 'pill', text: 'signin_with', locale: 'fr' });
+  }catch(e){ $('#gbtn-fallback').hidden = false; }
+  try{ google.accounts.id.prompt(); }catch(e){}
+  setTimeout(() => { if(!$('#gbtn').childElementCount) $('#gbtn-fallback').hidden = false; }, 1500);
+}
+async function handleCredential(response){
+  if(!response || !response.credential) return;
+  $('#auth-error').hidden = true;
+  try{
+    const data = await apiLogin(response.credential);
+    store.session = { token: data.token, exp: data.exp, email: data.email };
+    await bootApp();
+  }catch(e){
+    const el = $('#auth-error'); el.textContent = authMessage(e); el.hidden = false;
+  }
+}
+function logout(){
+  store.session = null;
+  try{ google.accounts.id.disableAutoSelect(); }catch(e){}
+  location.reload();
+}
+let reauthTimer = 0;
+function scheduleReauth(){
+  clearTimeout(reauthTimer);
+  reauthTimer = setTimeout(() => { store.session = null; showAuth('Session expirée — reconnecte-toi.'); }, 400);
+}
+
+/* ------------------------------------------------------------------- BOOT -- */
+var BOOT=null, MOIS={y:0,m:0}, STA={y:0};
+var TRI='recent', FILTRE='En cours';
+var CH={running:false,paused:false,started:0,acc:0,resume:0,livre:''};
+
+function setBoot(b){
+  BOOT = b; store.bootCache = b;
+}
+
+async function bootApp(){
+  $('#auth').hidden = true;
+  $('#app').hidden = false;
+
+  const cached = store.bootCache;
+  if(cached){ BOOT = cached; initFromBoot(); }
+  else { $('#loading').classList.remove('hide'); }
+
+  registerSW();
+  setOffline(!navigator.onLine);
+
+  try{
+    const b = await api('bootstrap');
+    setBoot(b);
+    initFromBoot();
+    flushQueue();
+  }catch(e){
+    if(e.message === 'unauthorized'){ store.session = null; return showAuth(); }
+    if(!cached){ $('#loading').innerHTML = '<p class="muted" style="text-align:center">Hors ligne et aucune donnée en cache.<br>Reconnecte-toi une fois en ligne.</p>'; return; }
+    toast('Hors ligne — données en cache', true);
+    setOffline(true);
+  }
+}
+function initFromBoot(){
+  $('#loading').classList.add('hide');
+  const now = new Date(BOOT.today);
+  if(!MOIS.y){ MOIS = { y: now.getFullYear(), m: now.getMonth()+1 }; }
+  if(!STA.y){ STA = { y: new Date().getFullYear() }; }
+  if(!CH.livre) CH.livre = BOOT.livreChrono || '';
+  recupererSession();
+  const cur = document.querySelector('nav.bottom button.on');
+  go(cur ? cur.dataset.v : 'chrono');
+  if(!window._ticking){ window._ticking = true; tick(); setInterval(tick, 1000); }
+}
+function refresh(b){ if(b) setBoot(b); renderActif(); }
+function renderActif(){ const v = document.querySelector('nav.bottom button.on'); if(v) go(v.dataset.v); }
+
+/* -------------------------------------------------------- OFFLINE / QUEUE -- */
+function setOffline(off){ $('#offline-bar').hidden = !off; }
+function updateOfflineUi(){
+  const n = store.queue.length;
+  const bar = $('#offline-bar');
+  if(n){ bar.hidden = false; bar.textContent = n + ' séance(s) en attente de synchronisation'; }
+  else { setOffline(!navigator.onLine); }
+}
+async function flushQueue(){
+  const q = store.queue;
+  if(!q.length || !store.session) { updateOfflineUi(); return; }
+  const keep = [];
+  for(let i=0; i<q.length; i++){
+    try{ await api(q[i].action, q[i].payload); }
+    catch(e){
+      if(e.message === 'network' || e.message === 'unauthorized'){ for(let j=i;j<q.length;j++) keep.push(q[j]); break; }
+      // erreur métier -> on jette l'élément et on continue
+      toast('Élément en attente ignoré (' + e.message + ')', true);
+    }
+  }
+  store.queue = keep;
+  updateOfflineUi();
+  if(q.length && !keep.length){
+    toast(q.length + ' séance(s) synchronisée(s) ✓');
+    try{ setBoot(await api('bootstrap')); renderActif(); }catch(e){}
+  }
+}
+function pendingFor(date){
+  return store.queue
+    .filter(x => x.action === 'addSession' && (!date || x.payload.date === date))
+    .map((x, i) => ({ id: 'attente-' + i, date: x.payload.date, livre: x.payload.livre,
+                      minutes: +x.payload.minutes || 0, source: 'attente', note: x.payload.note || '' }));
+}
+
+/* ---------------------------------------------------------------- NAV --- */
+function go(v){
+  ['chrono','mois','stats','livres','journal'].forEach(x =>
+    document.getElementById('v-'+x).classList.toggle('hide', x !== v));
+  document.querySelectorAll('nav.bottom button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  document.getElementById('title').textContent =
+    {chrono:'Chrono',mois:'Vue mensuelle',stats:'Statistiques',livres:'Mes livres',journal:'Journal'}[v];
+  if(v==='chrono')renderChrono();
+  if(v==='mois')renderMois();
+  if(v==='stats')renderStats();
+  if(v==='livres')renderLivresView();
+  if(v==='journal')renderJournal();
+}
+
+/* ================= CHRONO ================= */
+function fmt2(n){ return String(n).padStart(2,'0'); }
+function elapsedMs(){ return CH.acc + (CH.running && !CH.paused ? Date.now()-CH.resume : 0); }
+function tick(){
+  const s = Math.floor(elapsedMs()/1000), h = Math.floor(s/3600), m = Math.floor(s%3600/60), ss = s%60;
+  const d1 = document.getElementById('dial'), d2 = document.getElementById('dial2');
+  if(!d1) return;
+  if(h>0){ d1.textContent = h+'h'+fmt2(m); d2.textContent = fmt2(ss); }
+  else { d1.textContent = fmt2(m); d2.textContent = fmt2(ss); }
+}
+function persist(){
+  store.running = CH.running ? CH : null;
+  api('setRunning', { state: CH.running ? CH : null }).catch(function(){});
+}
+function recupererSession(){
+  const st = store.running || BOOT.running;
+  if(st && st.running){
+    CH = st;
+    const when = new Date(st.started);
+    document.getElementById('chrono-banner').innerHTML =
+      '<div class="banner">⏱️ Session en cours sur <b>'+esc(st.livre)+'</b> (démarrée à '+fmt2(when.getHours())+':'+fmt2(when.getMinutes())+'). '+
+      '<button class="btn ghost sm" onclick="terminer()">Terminer</button> · <button class="btn ghost sm" onclick="annuler()">Ignorer</button></div>';
+  }
+}
+function renderChrono(){
+  document.getElementById('chrono-livre').textContent = CH.livre || BOOT.livreChrono || 'À choisir';
+  const box = document.getElementById('chrono-actions'), st = document.getElementById('chrono-state');
+  box.innerHTML = ''; st.innerHTML = '';
+  if(!CH.running){
+    box.innerHTML = '<button class="btn wide" onclick="demarrer()">▶︎ Démarrer</button>';
+  }else if(CH.paused){
+    st.innerHTML = '<span class="muted">En pause</span>';
+    box.innerHTML = '<button class="btn" onclick="reprendre()">▶︎ Reprendre</button><button class="btn sec" onclick="terminer()">Terminer</button>';
+  }else{
+    st.innerHTML = '<span class="pulse"></span>&nbsp;<span class="muted">Lecture…</span>';
+    box.innerHTML = '<button class="btn sec" onclick="pause()">❚❚ Pause</button><button class="btn" onclick="terminer()">■ Terminer</button>';
+  }
+  renderChronoJour();
+}
+function demarrer(){
+  if(!CH.livre){ choisirLivre(true); return; }
+  CH = { running:true, paused:false, started:Date.now(), acc:0, resume:Date.now(), livre:CH.livre };
+  persist(); renderChrono();
+}
+function pause(){ CH.acc = elapsedMs(); CH.paused = true; persist(); renderChrono(); }
+function reprendre(){ CH.resume = Date.now(); CH.paused = false; persist(); renderChrono(); }
+function annuler(){
+  CH = { running:false, paused:false, started:0, acc:0, resume:0, livre:CH.livre };
+  store.running = null; api('setRunning', { state: null }).catch(function(){});
+  document.getElementById('chrono-banner').innerHTML = ''; renderChrono();
+}
+function terminer(){
+  const min = Math.max(1, Math.round(elapsedMs()/60000));
+  const l = CH.livre || BOOT.livreChrono;
+  modal('Fin de session',
+    '<div class="field"><label>Livre</label><input id="f-livre" value="'+escAttr(l)+'" readonly></div>'+
+    '<div class="field"><label>Durée (minutes)</label><input id="f-min" type="number" inputmode="numeric" value="'+min+'"></div>'+
+    '<div class="field"><label>Note de séance (facultatif)</label><textarea id="f-note" rows="2"></textarea></div>'+
+    '<label class="row" style="gap:8px"><input type="checkbox" id="f-fin" style="width:auto"> J\'ai terminé ce livre</label>',
+    [{t:'Annuler',c:closeModal},{t:'Enregistrer',p:1,c:function(){
+      const payload = { date: BOOT.today, livre: l, minutes: +document.getElementById('f-min').value,
+        note: document.getElementById('f-note').value, source: 'chrono', termine: document.getElementById('f-fin').checked };
+      if(!(payload.minutes > 0)){ toast('Durée invalide', true); return; }
+      mut('addSession', payload).then(r => {
+        annuler(); closeModal();
+        toast(r.offline ? 'Séance enregistrée hors ligne' : (r.message || 'Séance enregistrée'));
+        renderActif();
+      }).catch(err);
+    }}]);
+}
+function renderChronoJour(){ renderDayList(document.getElementById('chrono-jour'), BOOT.today, "Aujourd'hui"); }
+
+/* choisir / changer le livre du chrono */
+function choisirLivre(demarrerApres){
+  const l = BOOT.livres.slice();
+  window._grp = [
+    ['★ Chrono', l.filter(x => x.favori)],
+    ['En cours', l.filter(x => x.statut === 'En cours' && !x.favori).sort(byRecent)],
+    ['En pause', l.filter(x => x.statut === 'En pause').sort(byRecent)],
+    ['À lire',   l.filter(x => x.statut === 'À lire')],
+  ];
+  window._demApres = !!demarrerApres;
+  modal('Choisir le livre',
+    '<input id="lq" placeholder="Filtrer / nouveau titre…" oninput="filtLivreListe()">'+
+    '<div id="ll" style="margin-top:10px"></div>'+
+    '<button class="btn sec" style="margin-top:8px" onclick="nouveauDepuisChrono()">＋ Créer « <span id="lqx">…</span> »</button>',
+    [{t:'Fermer',c:closeModal}]);
+  filtLivreListe();
+}
+function filtLivreListe(){
+  const q = (document.getElementById('lq').value || '').toLowerCase();
+  document.getElementById('lqx').textContent = document.getElementById('lq').value || '…';
+  let out = '';
+  window._grp.forEach(g => {
+    const items = g[1].filter(x => x.titre.toLowerCase().indexOf(q) >= 0);
+    if(!items.length) return;
+    out += '<div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:10px 0 4px">'+g[0]+'</div>';
+    items.forEach(x => {
+      out += '<button class="li" onclick="pickLivre(this.dataset.t)" data-t="'+escAttr(x.titre)+'">'+
+        '<span class="badge">'+Math.round(x.totalMinutes/60)+'<small>h</small></span>'+
+        '<span class="grow"><span class="t">'+esc(x.titre)+'</span><span class="sub">'+x.format+' · '+x.statut+
+        (x.joursDepuis!=null ? ' · il y a '+x.joursDepuis+' j' : '')+'</span></span></button>';
+    });
+  });
+  document.getElementById('ll').innerHTML = out || '<p class="muted">Aucun livre — crée-le ci-dessous.</p>';
+}
+function pickLivre(t){
+  CH.livre = t; closeModal();
+  document.getElementById('chrono-livre').textContent = t;
+  mut('setChrono', { titre: t }).then(() => renderActif());
+  if(window._demApres) demarrer();
+}
+function nouveauDepuisChrono(){
+  const t = (document.getElementById('lq').value || '').trim(); if(!t) return;
+  editLivre({ titre:t, format:'', nature:'', statut:'En cours' }, () => pickLivre(t));
+}
+
+/* ================= MOIS ================= */
+const MOIS_NOMS = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+function moisNav(d){ MOIS.m += d; if(MOIS.m<1){MOIS.m=12;MOIS.y--;} if(MOIS.m>12){MOIS.m=1;MOIS.y++;} renderMois(); }
+function renderMois(){
+  document.getElementById('mois-titre').textContent = MOIS_NOMS[MOIS.m-1] + ' ' + MOIS.y;
+  document.getElementById('cal').innerHTML = '<div class="spin"></div>';
+  api('month', { year: MOIS.y, month: MOIS.m }).then(g => {
+    const s = g.seuils, set = (cl,v) => document.querySelectorAll('.'+cl).forEach(e => e.textContent = v);
+    set('s-v',s.v); set('s-g',s.g); set('s-g2',s.v-1); set('s-j',s.j); set('s-j2b',s.g-1); set('s-j2',s.j-1);
+    let h = '';
+    g.cells.forEach(c => {
+      if(!c){ h += '<div class="cell empty"></div>'; return; }
+      const bk = c.livres[0] ? c.livres[0].titre : '';
+      h += '<div class="cell '+c.bucket+'" onclick="jourDetail(\''+c.date+'\')">'+
+        (c.finis.length ? '<span class="fin">✓</span>' : '')+
+        '<span class="d">'+c.day+'</span>'+
+        (bk ? '<span class="bk">'+esc(bk)+'</span>' : '')+
+        (c.minutes ? '<span class="m">'+c.minutes+'′</span>' : '')+'</div>';
+    });
+    document.getElementById('cal').innerHTML = h;
+    document.getElementById('mois-resume').innerHTML =
+      kpi(fmtMin(g.totalMinutes),'ce mois-ci') + kpi(g.joursLus,'jours lus') +
+      kpi(g.livresTermines,'livres terminés') +
+      kpi((g.joursLus ? Math.round(g.totalMinutes/g.joursLus) : 0)+' min','moy. / jour lu');
+  }).catch(e => { document.getElementById('cal').innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur')+'</p>'; });
+}
+function jourDetail(date){
+  const wrap = document.createElement('div');
+  renderDayList(wrap, date, dateFr(date), true);
+  modal(dateFr(date), wrap.innerHTML, [{t:'Fermer',c:closeModal}]);
+}
+
+/* ================= STATS ================= */
+function statsNav(d){ STA.y += d; renderStats(); }
+function renderStats(){
+  document.getElementById('stats-annee').textContent = STA.y;
+  const body = document.getElementById('stats-body'); body.innerHTML = '<div class="spin"></div>';
+  api('stats', { year: STA.y }).then(s => {
+    const goalPct = s.goalYear ? Math.min(100, Math.round(s.totalYear/s.goalYear*100)) : 0;
+    const mx = a => Math.max.apply(null, a.concat([1]));
+    const maxM = mx(s.perMonth), maxW = mx(s.perWeekday);
+    const maxF = mx(s.perFormat.map(x=>x.minutes)), maxY = mx(s.perYear.map(x=>x.minutes)), maxB = mx(s.topBooks.map(x=>x.minutes));
+    const JJ = ['L','M','M','J','V','S','D'];
+    body.innerHTML =
+      '<div class="kpis">'+
+        kpi(fmtMin(s.totalYear),'lus en '+s.year) + kpi(s.booksFinishedYear,'livres terminés') +
+        kpi('🔥 '+s.streakCurrent+' j','série en cours') + kpi(s.streakRecord+' j','record')+
+      '</div>'+
+      '<div class="card pad" style="margin-top:12px">'+
+        '<div class="row" style="justify-content:space-between"><b>Objectif annuel</b>'+
+        '<span class="muted">'+fmtMin(s.totalYear)+' / '+fmtMin(s.goalYear)+'</span></div>'+
+        '<div class="progress"><i style="width:'+goalPct+'%"></i></div>'+
+        '<div class="muted" style="font-size:12px;margin-top:6px">'+s.avgPerDayYear+' min/jour · projection '+fmtMin(s.projectionYear)+'</div>'+
+      '</div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Par mois</b>'+
+        '<div class="mbars">'+s.perMonth.map(v => '<div class="mb" style="height:'+(v/maxM*100)+'%"></div>').join('')+'</div>'+
+        '<div class="mbars-x">'+MOIS_NOMS.map(n => '<div>'+n[0]+'</div>').join('')+'</div>'+
+      '</div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Par format</b><div class="bars">'+
+        s.perFormat.filter(x=>x.minutes>0).map(x => barRow(x.format,x.minutes,maxF)).join('')+'</div></div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Par jour de semaine</b><div class="bars">'+
+        s.perWeekday.map((v,i) => barRow(JJ[i],v,maxW)).join('')+'</div></div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Top livres (temps)</b><div class="bars">'+
+        s.topBooks.map(x => barRow(x.titre,x.minutes,maxB)).join('')+'</div></div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Par année</b><div class="bars">'+
+        s.perYear.map(x => barRow(x.year+' ('+x.books+' livres)',x.minutes,maxY)).join('')+'</div></div>'+
+      '<p class="muted" style="text-align:center;margin-top:14px;font-size:12px">Total historique : '+fmtMin(s.totalAll)+' · '+s.booksFinishedAll+' livres terminés</p>';
+  }).catch(e => { body.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne — reviens plus tard.':'Erreur : '+e.message)+'</p>'; });
+}
+function kpi(v,k){ return '<div class="kpi"><div class="v">'+v+'</div><div class="k">'+k+'</div></div>'; }
+function barRow(label,val,max){
+  return '<div class="bar-row"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(label)+'</span>'+
+    '<span class="bar-track"><span class="bar-fill" style="width:'+(val/max*100)+'%"></span></span>'+
+    '<span class="muted" style="text-align:right">'+fmtMinShort(val)+'</span></div>';
+}
+
+/* ================= LIVRES ================= */
+function renderLivresView(){
+  document.getElementById('livres-filtres').innerHTML =
+    ['Tous','En cours','En pause','Terminé','À lire','Abandonné']
+      .map(o => '<button class="'+(o===FILTRE?'on':'')+'" onclick="setFiltre(\''+o+'\')">'+o+'</button>').join('');
+  renderLivres();
+}
+function setFiltre(o){ FILTRE = o; renderLivresView(); }
+function setTri(btn){
+  TRI = btn.dataset.tri;
+  document.querySelectorAll('#v-livres .seg button[data-tri]').forEach(b => b.classList.toggle('on', b === btn));
+  renderLivres();
+}
+function byRecent(a,b){ return (b.derniere||'').localeCompare(a.derniere||''); }
+function renderLivres(){
+  const q = (document.getElementById('livres-q').value || '').toLowerCase();
+  let arr = BOOT.livres.filter(x => (FILTRE==='Tous' || x.statut===FILTRE) && x.titre.toLowerCase().indexOf(q) >= 0);
+  if(TRI==='temps') arr.sort((a,b) => b.totalMinutes - a.totalMinutes);
+  else if(TRI==='titre') arr.sort((a,b) => a.titre.localeCompare(b.titre,'fr'));
+  else arr.sort(byRecent);
+  document.getElementById('livres-list').innerHTML = arr.map(x =>
+    '<button class="li" onclick="openLivre(this.dataset.t)" data-t="'+escAttr(x.titre)+'">'+
+      '<span class="badge">'+fmtMinShort(x.totalMinutes)+'</span>'+
+      '<span class="grow"><span class="t">'+(x.favori?'★ ':'')+esc(x.titre)+'</span>'+
+      '<span class="sub">'+x.joursActifs+' j actifs'+
+        (x.joursDepuis!=null ? ' · '+(x.joursDepuis===0?"aujourd'hui":'il y a '+x.joursDepuis+' j') : '')+
+        (x.note ? ' · '+'★'.repeat(Math.round(x.note)) : '')+'</span>'+
+      '<span class="tags"><span class="chip">'+x.format+'</span><span class="chip">'+x.nature+'</span><span class="chip">'+x.statut+'</span></span>'+
+    '</span></button>'
+  ).join('') || '<p class="muted pad">Aucun livre.</p>';
+}
+function openLivre(t){ editLivre(BOOT.livres.filter(l => l.titre === t)[0] || null); }
+function editLivre(l, apres){
+  l = l || { titre:'', format:'', nature:'', statut:'À lire', serie:'', note:0, commentaire:'', alias:'' };
+  const neuf = !l.titre || !BOOT.livres.some(x => x.titre === l.titre);
+  const F = BOOT.formats, N = BOOT.natures, S = BOOT.statuts;
+  const html =
+    '<div class="field"><label>Titre</label><input id="e-t" value="'+escAttr(l.titre)+'"></div>'+
+    '<div class="field"><label>Format</label><div class="seg" id="e-f">'+F.map(x => segb(x, x===l.format)).join('')+'</div></div>'+
+    '<div class="field"><label>Nature</label><div class="seg" id="e-n">'+N.map(x => segb(x, x===l.nature)).join('')+'</div></div>'+
+    '<div class="field"><label>Statut</label><div class="seg" id="e-s">'+S.map(x => segb(x, x===l.statut)).join('')+'</div></div>'+
+    '<div class="field"><label>Série (facultatif)</label><input id="e-serie" value="'+escAttr(l.serie||'')+'"></div>'+
+    '<div class="field"><label>Note</label><div class="seg" id="e-note">'+[0,1,2,3,4,5].map(x => segb(x||'—', x===Math.round(l.note||0), x)).join('')+'</div></div>'+
+    '<div class="field"><label>Commentaire</label><textarea id="e-c" rows="2">'+esc(l.commentaire||'')+'</textarea></div>'+
+    '<label class="row" style="gap:8px;margin-bottom:12px"><input type="checkbox" id="e-chrono" style="width:auto"'+(l.favori?' checked':'')+'> Livre du chrono</label>'+
+    (neuf ? '' : '<div id="e-sessions" style="margin-bottom:12px"></div>'+
+      '<button class="btn ghost sm" onclick="fusionner(this.dataset.t)" data-t="'+escAttr(l.titre)+'">Fusionner avec un autre titre…</button>');
+  modal(neuf ? 'Nouveau livre' : l.titre, html, [{t:'Fermer',c:closeModal},{t:'Enregistrer',p:1,c:function(){
+    const p = { titreOriginal:l.titre, titre:document.getElementById('e-t').value.trim(),
+      format:segVal('e-f'), nature:segVal('e-n'), statut:segVal('e-s'),
+      serie:document.getElementById('e-serie').value.trim(),
+      note:segVal('e-note',true), commentaire:document.getElementById('e-c').value.trim(),
+      definirChrono:document.getElementById('e-chrono').checked };
+    if(!p.titre){ toast('Titre requis', true); return; }
+    mut('saveBook', p).then(r => { closeModal(); toast(r.offline?'Enregistré hors ligne':'Enregistré'); renderActif(); if(apres)apres(); }).catch(err);
+  }}]);
+  if(!neuf) renderDayList(document.getElementById('e-sessions'), null, 'Sessions', true, l.titre);
+}
+function fusionner(cible){
+  const autres = BOOT.livres.filter(x => x.titre !== cible).map(x => x.titre).sort();
+  modal('Fusionner vers « ' + cible + ' »',
+    '<p class="muted">Les sessions des titres cochés seront rattachées à « '+esc(cible)+' » et leurs fiches supprimées.</p>'+
+    autres.map(t => '<label class="row" style="gap:8px;padding:6px 0"><input type="checkbox" value="'+escAttr(t)+'" style="width:auto"> '+esc(t)+'</label>').join(''),
+    [{t:'Annuler',c:closeModal},{t:'Fusionner',p:1,c:function(){
+      const src = [].slice.call(document.querySelectorAll('.sheet input[type=checkbox]:checked')).map(c => c.value);
+      if(!src.length){ closeModal(); return; }
+      mut('mergeBooks', { sources: src, cible: cible }).then(r => { closeModal(); toast(r.offline?'Fusion en attente':'Fusionné'); renderActif(); }).catch(err);
+    }}]);
+}
+
+/* ================= JOURNAL ================= */
+function renderJournal(){
+  const el = document.getElementById('journal-list'); el.innerHTML = '<div class="spin"></div>';
+  api('sessions', { limit: 500 }).then(rows => {
+    rows = pendingFor(null).concat(rows);
+    const grp = {}, order = [];
+    rows.forEach(r => { if(!grp[r.date]){ grp[r.date] = []; order.push(r.date); } grp[r.date].push(r); });
+    order.sort().reverse();
+    el.innerHTML = order.map(d => {
+      const tot = grp[d].reduce((s,r) => s + r.minutes, 0);
+      return '<div class="row" style="justify-content:space-between;margin:16px 2px 6px"><b>'+dateFr(d)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>'+
+        '<div class="card">'+grp[d].map(sessionRow).join('')+'</div>';
+    }).join('') || '<p class="muted">Aucune session.</p>';
+  }).catch(e => { el.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur : '+e.message)+'</p>'; });
+}
+const SESS = {};
+function sessionRow(r){
+  SESS[r.id] = r;
+  const attente = r.source === 'attente';
+  return '<button class="li" onclick="openSession(this.dataset.id)" data-id="'+escAttr(r.id)+'"'+(attente?' disabled style="opacity:.6"':'')+'>'+
+    '<span class="badge">'+r.minutes+'<small>min</small></span>'+
+    '<span class="grow"><span class="t">'+esc(r.livre)+'</span>'+
+    '<span class="sub"><span class="dot '+r.source+'"></span>'+(attente?'en attente de synchro':r.source)+(r.note?' · '+esc(r.note):'')+'</span></span></button>';
+}
+function openSession(id){ const r = SESS[id]; if(r && r.source !== 'attente') editSession(r); }
+function editSession(r){
+  modal('Session',
+    '<div class="field"><label>Livre</label><input id="s-livre" value="'+escAttr(r.livre)+'"></div>'+
+    '<div class="field"><label>Date</label><input id="s-date" type="date" value="'+r.date+'"></div>'+
+    '<div class="field"><label>Minutes</label><input id="s-min" type="number" inputmode="numeric" value="'+r.minutes+'"></div>'+
+    '<div class="field"><label>Note</label><textarea id="s-note" rows="2">'+esc(r.note||'')+'</textarea></div>',
+    [{t:'Supprimer',c:function(){
+      modal('Supprimer ?','<p class="muted">Supprimer définitivement cette session ('+r.minutes+' min · '+esc(r.livre)+' · '+dateFr(r.date)+') ?</p>',
+        [{t:'Non',c:function(){ editSession(r); }},
+         {t:'Oui, supprimer',p:1,c:function(){ mut('deleteSession',{id:r.id}).then(x => { closeModal(); toast(x.offline?'Suppression en attente':'Session supprimée'); renderActif(); }).catch(err); }}]);
+     }},
+     {t:'Enregistrer',p:1,c:function(){
+      mut('updateSession', { id:r.id, livre:document.getElementById('s-livre').value,
+        date:document.getElementById('s-date').value, minutes:+document.getElementById('s-min').value,
+        note:document.getElementById('s-note').value })
+        .then(x => { closeModal(); toast(x.offline?'Modif en attente':'Modifié'); renderActif(); }).catch(err);
+    }}]);
+}
+function ajoutManuel(){
+  const livres = BOOT.livres.slice().sort(byRecent);
+  modal('Ajouter une session',
+    '<div class="field"><label>Livre</label><input id="a-livre" list="a-dl" value="'+escAttr(CH.livre||BOOT.livreChrono||'')+'">'+
+      '<datalist id="a-dl">'+livres.map(x => '<option value="'+escAttr(x.titre)+'">').join('')+'</datalist></div>'+
+    '<div class="field"><label>Date</label><input id="a-date" type="date" value="'+BOOT.today+'"></div>'+
+    '<div class="field"><label>Minutes</label><input id="a-min" type="number" inputmode="numeric" value="20"></div>'+
+    '<div class="field"><label>Note (facultatif)</label><textarea id="a-note" rows="2"></textarea></div>'+
+    '<label class="row" style="gap:8px"><input type="checkbox" id="a-fin" style="width:auto"> Livre terminé</label>',
+    [{t:'Annuler',c:closeModal},{t:'Ajouter',p:1,c:function(){
+      const p = { livre:document.getElementById('a-livre').value.trim(), date:document.getElementById('a-date').value,
+        minutes:+document.getElementById('a-min').value, note:document.getElementById('a-note').value,
+        source:'manuel', termine:document.getElementById('a-fin').checked };
+      if(!p.livre){ toast('Livre requis', true); return; }
+      if(!(p.minutes > 0)){ toast('Durée invalide', true); return; }
+      mut('addSession', p).then(r => { closeModal(); toast(r.offline?'Séance hors ligne':(r.message||'Ajouté')); renderActif(); }).catch(err);
+    }}]);
+}
+
+/* -------- liste de sessions (jour ou livre) -------- */
+function renderDayList(el, date, titre, compact, livre){
+  el.innerHTML = '<div class="muted" style="font-size:12px">…</div>';
+  const done = rows => {
+    if(date) rows = pendingFor(date).concat(rows.filter(r => r.date === date));
+    else if(livre) rows = pendingFor(null).filter(r => r.livre === livre).concat(rows);
+    const tot = rows.reduce((s,r) => s + r.minutes, 0);
+    el.innerHTML = (titre ? '<div class="row" style="justify-content:space-between;margin-bottom:6px"><b>'+esc(titre)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>' : '')+
+      (rows.length ? '<div class="card">'+rows.map(sessionRow).join('')+'</div>' : '<p class="muted" style="font-size:13px">Aucune session.</p>');
+  };
+  api('sessions', livre ? { livre: livre, limit: 60 } : { limit: 500 }).then(done)
+    .catch(() => done([]));
+}
+
+/* ================= RÉGLAGES (appli) ================= */
+function openReglages(){
+  const r = BOOT ? BOOT.reglages : {};
+  modal('Réglages',
+    '<div class="field"><label>Objectif annuel (minutes)</label><input id="r-an" type="number" value="'+(r.objectif_annuel_min||6000)+'"></div>'+
+    '<div class="field"><label>Objectif quotidien (minutes)</label><input id="r-jour" type="number" value="'+(r.objectif_quotidien_min||20)+'"></div>'+
+    '<div class="row" style="gap:8px">'+
+      '<div class="field grow"><label>Seuil violet</label><input id="r-v" type="number" value="'+(r.seuil_violet||50)+'"></div>'+
+      '<div class="field grow"><label>Seuil vert</label><input id="r-g" type="number" value="'+(r.seuil_vert||20)+'"></div>'+
+      '<div class="field grow"><label>Seuil jaune</label><input id="r-j" type="number" value="'+(r.seuil_jaune||5)+'"></div>'+
+    '</div>'+
+    '<div class="field"><label>Mise en pause auto après (jours sans session)</label><input id="r-p" type="number" value="'+(r.pause_auto_jours||21)+'"></div>'+
+    '<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">'+
+    '<button class="btn sec sm" onclick="window.open(\''+DEFAULTS.SHEET_URL+'\',\'_blank\')">Ouvrir la feuille (BDD)</button> '+
+    '<button class="btn ghost sm" onclick="closeModal();openSettings()">Réglages avancés</button>'+
+    '<p class="muted" style="font-size:11px;margin-top:14px">Journal de Lecture · PWA v1' + (BOOT && BOOT.email ? ' · '+esc(BOOT.email) : '') + '</p>',
+    [{t:'Fermer',c:closeModal},{t:'Enregistrer',p:1,c:function(){
+      mut('saveReglages', { objectif_annuel_min:val('r-an'), objectif_quotidien_min:val('r-jour'),
+        seuil_violet:val('r-v'), seuil_vert:val('r-g'), seuil_jaune:val('r-j'), pause_auto_jours:val('r-p') })
+        .then(x => { closeModal(); toast(x.offline?'Réglages en attente':'Réglages enregistrés'); renderActif(); }).catch(err);
+    }}]);
+}
+
+/* ================= RÉGLAGES avancés (dialog) ================= */
+function openSettings(){
+  const dlg = $('#settings');
+  $('#s-api').value = localStorage.getItem('jdl.apiUrl') || '';
+  $('#s-client').value = localStorage.getItem('jdl.clientId') || '';
+  $('#s-status').textContent = store.session ? ('Connecté : ' + store.session.email) : 'Non connecté';
+  dlg.showModal();
+}
+function wireSettings(){
+  $('#s-save').onclick = () => {
+    store.apiUrl = $('#s-api').value.trim();
+    store.clientId = $('#s-client').value.trim();
+    toast('Enregistré — rechargement…'); setTimeout(() => location.reload(), 600);
+  };
+  $('#s-logout').onclick = logout;
+  $('#s-close').onclick = () => $('#settings').close();
+  $('#auth-settings').onclick = openSettings;
+  $('#gbtn-fallback').onclick = () => { try{ google.accounts.id.prompt(); }catch(e){} };
+}
+
+/* ================= utilitaires UI ================= */
+function modal(titre, html, btns){
+  const root = document.getElementById('modal-root');
+  root.innerHTML = '<div class="scrim">'+
+    '<div class="sheet"><div class="grabber"></div><h2>'+esc(titre)+'</h2>'+html+
+    '<div class="row" style="gap:8px;margin-top:14px">'+
+    btns.map((b,i) => '<button class="btn '+(b.p?'':'sec')+'" data-i="'+i+'">'+b.t+'</button>').join('')+
+    '</div></div></div>';
+  root.querySelector('.scrim').addEventListener('click', e => { if(e.target === e.currentTarget) closeModal(); });
+  btns.forEach((b,i) => { root.querySelector('[data-i="'+i+'"]').onclick = b.c; });
+}
+function closeModal(){ document.getElementById('modal-root').innerHTML = ''; }
+function segb(label, on, val){ return '<button class="'+(on?'on':'')+'" data-val="'+escAttr(val!==undefined?val:label)+'" onclick="segPick(this)">'+esc(String(label))+'</button>'; }
+function segPick(b){ [].slice.call(b.parentNode.children).forEach(x => x.classList.remove('on')); b.classList.add('on'); }
+function segVal(id, num){ const b = document.querySelector('#'+id+' .on'); const v = b ? b.dataset.val : ''; return num ? (+v||0) : v; }
+function val(id){ return document.getElementById(id).value; }
+function toast(m, err){
+  const t = document.getElementById('toast');
+  t.textContent = m; t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), err ? 3200 : 2200);
+}
+function err(e){ toast('Erreur : ' + ((e && e.message) || e), true); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function escAttr(s){ return esc(s); }
+function fmtMin(m){ const h = Math.floor(m/60), x = m%60; return h ? (h+' h'+(x?' '+x:'')) : (m+' min'); }
+function fmtMinShort(m){ return m>=60 ? (Math.round(m/60*10)/10+'h') : (m+'′'); }
+function dateFr(d){ const p = String(d).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
+
+/* ------------------------------------------------------------------ INIT -- */
+function registerSW(){ if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {}); }
+
+window.addEventListener('online', () => { setOffline(false); flushQueue(); });
+window.addEventListener('offline', () => setOffline(true));
+
+document.addEventListener('DOMContentLoaded', () => {
+  wireSettings();
+  const s = store.session;
+  if(s && s.exp > Date.now()) bootApp();
+  else showAuth();
+});
