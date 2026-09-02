@@ -1,13 +1,18 @@
-/* Service worker — cache de la coquille applicative uniquement.
-   Les appels API (script.google.com / googleusercontent.com) ne sont jamais mis en cache. */
-const CACHE = 'jdl-shell-v3';
+/* Service worker — la coquille est servie RÉSEAU D'ABORD (toujours à jour en ligne),
+   le cache ne sert que de secours hors ligne. Les appels API ne passent jamais par ici. */
+const CACHE = 'jdl-shell-v4';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/favicon-32.png', './icons/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => Promise.all(ASSETS.map((a) =>
+        fetch(a, { cache: 'reload' }).then((r) => r.ok && c.put(a, r)).catch(() => {}))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -23,25 +28,28 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin) return; // API -> réseau direct
 
-  // Coquille (navigation + html/js/css) : réseau d'abord, cache en secours (toujours à jour en ligne).
   const isShell = req.mode === 'navigate' || /\.(?:html|js|css|webmanifest)$/.test(url.pathname);
+
   if (isShell) {
+    // réseau d'abord, en contournant le cache HTTP du navigateur
     e.respondWith(
-      fetch(req).then((resp) => {
-        const copy = resp.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy));
-        return resp;
-      }).catch(() => caches.match(req).then((r) => r || caches.match('./index.html')))
+      fetch(req, { cache: 'reload' })
+        .then((resp) => {
+          const copy = resp.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+          return resp;
+        })
+        .catch(() => caches.match(req).then((r) => r || caches.match('./index.html')))
     );
     return;
   }
 
-  // Autres (icônes...) : cache d'abord.
+  // icônes & co : cache d'abord
   e.respondWith(
     caches.match(req).then((cached) => cached || fetch(req).then((resp) => {
       if (resp && resp.status === 200 && resp.type === 'basic') {
         const copy = resp.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy));
+        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
       }
       return resp;
     }))

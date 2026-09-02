@@ -630,7 +630,14 @@ function fmtMinShort(m){ return m>=60 ? (Math.round(m/60*10)/10+'h') : (m+'′')
 function dateFr(d){ const p = String(d).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
 
 /* ------------------------------------------------------------------ INIT -- */
-function registerSW(){ if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {}); }
+function registerSW(){
+  if(!('serviceWorker' in navigator)) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if(hadController) location.reload(); });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+  }).catch(() => {});
+}
 
 window.addEventListener('online', () => { setOffline(false); flushQueue(); });
 window.addEventListener('offline', () => setOffline(true));
