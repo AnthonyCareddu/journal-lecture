@@ -378,8 +378,18 @@ function jourDetail(date){
 function statsNav(d){ STA.y += d; renderStats(); }
 function renderStats(){
   document.getElementById('stats-annee').textContent = STA.y;
-  const body = document.getElementById('stats-body'); body.innerHTML = '<div class="spin"></div>';
+  const body = document.getElementById('stats-body');
+  const anneeCourante = (BOOT && BOOT.anneeCourante) || new Date().getFullYear();
+  if(BOOT && BOOT.stats && STA.y === anneeCourante) drawStats(BOOT.stats);   // rendu instantané
+  else body.innerHTML = '<div class="spin"></div>';
   api('stats', { year: STA.y }).then(s => {
+    if(STA.y === anneeCourante && BOOT) BOOT.stats = s;
+    drawStats(s);
+  }).catch(e => { if(!body.querySelector('.kpis')) body.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne — reviens plus tard.':'Erreur : '+e.message)+'</p>'; });
+}
+function drawStats(s){
+  const body = document.getElementById('stats-body');
+  {
     const goalPct = s.goalYear ? Math.min(100, Math.round(s.totalYear/s.goalYear*100)) : 0;
     const mx = a => Math.max.apply(null, a.concat([1]));
     const maxM = mx(s.perMonth), maxW = mx(s.perWeekday);
@@ -409,7 +419,7 @@ function renderStats(){
       '<div class="card pad" style="margin-top:12px"><b>Par année</b><div class="bars">'+
         s.perYear.map(x => barRow(x.year+' ('+x.books+' livres)',x.minutes,maxY)).join('')+'</div></div>'+
       '<p class="muted" style="text-align:center;margin-top:14px;font-size:12px">Total historique : '+fmtMin(s.totalAll)+' · '+s.booksFinishedAll+' livres terminés</p>';
-  }).catch(e => { body.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne — reviens plus tard.':'Erreur : '+e.message)+'</p>'; });
+  }
 }
 function kpi(v,k){ return '<div class="kpi"><div class="v">'+v+'</div><div class="k">'+k+'</div></div>'; }
 function barRow(label,val,max){
@@ -489,19 +499,26 @@ function fusionner(cible){
 }
 
 /* ================= JOURNAL ================= */
+function drawJournal(rows){
+  const el = document.getElementById('journal-list');
+  rows = pendingFor(null).concat(rows);
+  const grp = {}, order = [];
+  rows.forEach(r => { if(!grp[r.date]){ grp[r.date] = []; order.push(r.date); } grp[r.date].push(r); });
+  order.sort().reverse();
+  el.innerHTML = order.map(d => {
+    const tot = grp[d].reduce((s,r) => s + r.minutes, 0);
+    return '<div class="row" style="justify-content:space-between;margin:16px 2px 6px"><b>'+dateFr(d)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>'+
+      '<div class="card">'+grp[d].map(sessionRow).join('')+'</div>';
+  }).join('') || '<p class="muted">Aucune session.</p>';
+}
 function renderJournal(){
-  const el = document.getElementById('journal-list'); el.innerHTML = '<div class="spin"></div>';
+  const el = document.getElementById('journal-list');
+  const seed = (BOOT && BOOT.sessionsRecent) || [];
+  if(seed.length) drawJournal(seed); else el.innerHTML = '<div class="spin"></div>';
   api('sessions', { limit: 500 }).then(rows => {
-    rows = pendingFor(null).concat(rows);
-    const grp = {}, order = [];
-    rows.forEach(r => { if(!grp[r.date]){ grp[r.date] = []; order.push(r.date); } grp[r.date].push(r); });
-    order.sort().reverse();
-    el.innerHTML = order.map(d => {
-      const tot = grp[d].reduce((s,r) => s + r.minutes, 0);
-      return '<div class="row" style="justify-content:space-between;margin:16px 2px 6px"><b>'+dateFr(d)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>'+
-        '<div class="card">'+grp[d].map(sessionRow).join('')+'</div>';
-    }).join('') || '<p class="muted">Aucune session.</p>';
-  }).catch(e => { el.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur : '+e.message)+'</p>'; });
+    if(BOOT) BOOT.sessionsRecent = rows.slice(0, 150);
+    drawJournal(rows);
+  }).catch(e => { if(!el.querySelector('.card')) el.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur : '+e.message)+'</p>'; });
 }
 const SESS = {};
 function sessionRow(r){
@@ -552,16 +569,19 @@ function ajoutManuel(){
 
 /* -------- liste de sessions (jour ou livre) -------- */
 function renderDayList(el, date, titre, compact, livre){
-  el.innerHTML = '<div class="muted" style="font-size:12px">…</div>';
   const done = rows => {
     if(date) rows = pendingFor(date).concat(rows.filter(r => r.date === date));
-    else if(livre) rows = pendingFor(null).filter(r => r.livre === livre).concat(rows);
+    else if(livre) rows = pendingFor(null).filter(r => r.livre === livre).concat(rows.filter(r => r.livre === livre));
     const tot = rows.reduce((s,r) => s + r.minutes, 0);
     el.innerHTML = (titre ? '<div class="row" style="justify-content:space-between;margin-bottom:6px"><b>'+esc(titre)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>' : '')+
       (rows.length ? '<div class="card">'+rows.map(sessionRow).join('')+'</div>' : '<p class="muted" style="font-size:13px">Aucune session.</p>');
   };
-  api('sessions', livre ? { livre: livre, limit: 60 } : { limit: 500 }).then(done)
-    .catch(() => done([]));
+  const seed = (BOOT && BOOT.sessionsRecent) || [];
+  if(seed.length) done(seed); else el.innerHTML = '<div class="muted" style="font-size:12px">…</div>';
+  api('sessions', livre ? { livre: livre, limit: 60 } : { limit: 500 }).then(rows => {
+    if(!livre && BOOT) BOOT.sessionsRecent = rows.slice(0, 150);
+    done(rows);
+  }).catch(() => { if(!seed.length) done([]); });
 }
 
 /* ================= RÉGLAGES (appli) ================= */
