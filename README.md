@@ -18,12 +18,25 @@ statistiques, gestion des livres (format / nature / statut), journal éditable.
 | `sw.js` | service worker (cache de la coquille uniquement) |
 | `manifest.webmanifest` | métadonnées d'installation |
 | `icons/` | icônes PWA |
+| `Code.gs` | **back-end** — copie de référence du script Apps Script lié à la feuille BDD |
 
 ## Configuration
 
 En haut de `app.js` (`DEFAULTS`) : URL de l'API et ID client Google.
 Surchargables à l'exécution via **⚙️ → Réglages avancés** (stockés en `localStorage`).
 
-Le back-end (projet Apps Script lié à la feuille BDD) expose les actions
+## Back-end (`Code.gs`)
+
+Projet Apps Script **lié** à la feuille « Journal de Lecture — Base de données »
+(onglets `sessions` · `livres` · `reglages`). `Code.gs` ici est la copie de référence :
+après modification, la coller dans l'éditeur puis **Déployer ▸ Gérer les déploiements ▸
+(crayon) ▸ Version : Nouvelle version** (l'URL `/exec` ne change pas).
+
+Actions exposées à la PWA :
 `bootstrap · month · stats · sessions · addSession · updateSession · deleteSession ·
-saveBook · createBook · mergeBooks · setChrono · saveReglages · setRunning`.
+saveBook · createBook · mergeBooks · setChrono · saveReglages · setRunning`
+
+Fonctions à lancer à la main depuis l'éditeur :
+`setupBase` (création des onglets) · `importerHistorique` / `reimporter` (migration de
+l'ancienne feuille) · `corrigerStatuts` (rattrapage des statuts mal devinés à la migration) ·
+`diagnostic` · `autoriser`.

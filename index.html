@@ -73,11 +73,14 @@
 
     <!-- MOIS -->
     <section id="v-mois" class="view hide">
-      <div class="row" style="justify-content:space-between;margin-bottom:12px">
-        <button class="btn sec sm" onclick="moisNav(-1)">‹</button>
+      <div class="mois-nav">
+        <button class="btn sec sm" onclick="moisNav(-12)" aria-label="Année précédente">«</button>
+        <button class="btn sec sm" onclick="moisNav(-1)" aria-label="Mois précédent">‹</button>
         <h2 id="mois-titre"></h2>
-        <button class="btn sec sm" onclick="moisNav(1)">›</button>
+        <button class="btn sec sm" onclick="moisNav(1)" aria-label="Mois suivant">›</button>
+        <button class="btn sec sm" onclick="moisNav(12)" aria-label="Année suivante">»</button>
       </div>
+      <button id="mois-auj" class="btn ghost sm" hidden onclick="moisAujourdhui()" style="display:block;margin:0 auto 12px">↩︎ Revenir au mois en cours</button>
       <div class="cal-head"><div>L</div><div>M</div><div>M</div><div>J</div><div>V</div><div>S</div><div>D</div></div>
       <div class="cal" id="cal"></div>
       <div id="mois-resume" class="kpis" style="margin-top:14px"></div>
@@ -104,18 +107,27 @@
     <section id="v-livres" class="view hide">
       <input id="livres-q" placeholder="Rechercher un livre…" oninput="renderLivres()" style="margin-bottom:10px">
       <div class="seg" id="livres-filtres" style="margin-bottom:8px"></div>
-      <div class="seg" style="margin-bottom:12px">
+      <button class="btn ghost sm" id="livres-plus" onclick="toggleFiltres()" style="margin-bottom:8px">Filtres ▾</button>
+      <div id="livres-filtres-plus" hidden style="margin-bottom:10px"></div>
+      <div class="seg" style="margin-bottom:10px">
         <button class="on" data-tri="recent" onclick="setTri(this)">Récents</button>
         <button data-tri="temps" onclick="setTri(this)">Temps</button>
         <button data-tri="titre" onclick="setTri(this)">A–Z</button>
       </div>
-      <button class="btn sec" style="margin-bottom:12px" onclick="editLivre(null)">＋ Nouveau livre</button>
+      <button class="btn sec" style="margin-bottom:10px" onclick="editLivre(null)">＋ Nouveau livre</button>
+      <div id="livres-count" class="muted" style="font-size:12px;margin-bottom:8px"></div>
       <div class="card" id="livres-list"></div>
     </section>
 
     <!-- JOURNAL -->
     <section id="v-journal" class="view hide">
       <button class="btn sec" style="margin-bottom:12px" onclick="ajoutManuel()">＋ Ajouter une session</button>
+      <div class="row" style="gap:8px;margin-bottom:8px">
+        <input id="jr-livre" class="grow" list="jr-dl" placeholder="Filtrer par livre…" oninput="filtreJournal()">
+        <input id="jr-mois" type="month" oninput="filtreJournal()" aria-label="Filtrer par mois" style="width:auto">
+      </div>
+      <datalist id="jr-dl"></datalist>
+      <button id="jr-clear" class="btn ghost sm" hidden onclick="journalClear()" style="margin-bottom:8px">Effacer les filtres</button>
       <div id="journal-list"></div>
     </section>
   </div>

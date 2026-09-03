@@ -128,7 +128,9 @@ function scheduleReauth(){
 /* ------------------------------------------------------------------- BOOT -- */
 var BOOT=null, MOIS={y:0,m:0}, STA={y:0};
 var TRI='recent', FILTRE='En cours';
+var FLT={format:'',nature:'',note:0}, FILTRES_OUV=false, GROUPE=true, SERIES_OUV={};
 var CH={running:false,paused:false,started:0,acc:0,resume:0,livre:''};
+var moisReq=0, staReq=0, journalRows=[];
 
 function setBoot(b){
   BOOT = b; store.bootCache = b;
@@ -257,12 +259,26 @@ function renderChrono(){
     box.innerHTML = '<button class="btn wide" onclick="demarrer()">▶︎ Démarrer</button>';
   }else if(CH.paused){
     st.innerHTML = '<span class="muted">En pause</span>';
-    box.innerHTML = '<button class="btn" onclick="reprendre()">▶︎ Reprendre</button><button class="btn sec" onclick="terminer()">Terminer</button>';
+    box.innerHTML = '<button class="btn" onclick="reprendre()">▶︎ Reprendre</button><button class="btn sec" onclick="terminer()">Terminer</button>'+
+      '<button class="btn ghost wide" onclick="annulerChrono()">Annuler la séance</button>';
   }else{
     st.innerHTML = '<span class="pulse"></span>&nbsp;<span class="muted">Lecture…</span>';
-    box.innerHTML = '<button class="btn sec" onclick="pause()">❚❚ Pause</button><button class="btn" onclick="terminer()">■ Terminer</button>';
+    box.innerHTML = '<button class="btn sec" onclick="pause()">❚❚ Pause</button><button class="btn" onclick="terminer()">■ Terminer</button>'+
+      '<button class="btn ghost wide" onclick="annulerChrono()">Annuler la séance</button>';
   }
   renderChronoJour();
+}
+/* abandonne la séance en cours sans rien enregistrer */
+function annulerChrono(){
+  const min = Math.round(elapsedMs()/60000);
+  if(min >= 2){
+    modal('Annuler la séance ?',
+      '<p class="muted">Le temps écoulé ('+min+' min) sera perdu. Aucune séance ne sera enregistrée.</p>',
+      [{t:'Continuer la lecture',c:closeModal},
+       {t:'Annuler la séance',p:1,c:function(){ closeModal(); annuler(); toast('Séance annulée'); }}]);
+  }else{
+    annuler(); toast('Séance annulée');
+  }
 }
 function demarrer(){
   if(!CH.livre){ choisirLivre(true); return; }
@@ -344,11 +360,25 @@ function nouveauDepuisChrono(){
 
 /* ================= MOIS ================= */
 const MOIS_NOMS = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
-function moisNav(d){ MOIS.m += d; if(MOIS.m<1){MOIS.m=12;MOIS.y--;} if(MOIS.m>12){MOIS.m=1;MOIS.y++;} renderMois(); }
+function moisNav(d){
+  const t = MOIS.y*12 + (MOIS.m-1) + d;
+  MOIS.y = Math.floor(t/12); MOIS.m = (t%12)+1;
+  renderMois();
+}
+function moisAujourdhui(){
+  const n = new Date((BOOT && BOOT.today) || Date.now());
+  MOIS = { y:n.getFullYear(), m:n.getMonth()+1 };
+  renderMois();
+}
 function renderMois(){
-  document.getElementById('mois-titre').textContent = MOIS_NOMS[MOIS.m-1] + ' ' + MOIS.y;
+  const my = ++moisReq;                       // ignore les réponses d'une nav dépassée
+  const y = MOIS.y, m = MOIS.m;
+  document.getElementById('mois-titre').textContent = MOIS_NOMS[m-1] + ' ' + y;
+  const n = new Date((BOOT && BOOT.today) || Date.now());
+  document.getElementById('mois-auj').hidden = (y === n.getFullYear() && m === n.getMonth()+1);
   document.getElementById('cal').innerHTML = '<div class="spin"></div>';
-  api('month', { year: MOIS.y, month: MOIS.m }).then(g => {
+  api('month', { year: y, month: m }).then(g => {
+    if(my !== moisReq || g.year !== MOIS.y || g.month !== MOIS.m) return;
     const s = g.seuils, set = (cl,v) => document.querySelectorAll('.'+cl).forEach(e => e.textContent = v);
     set('s-v',s.v); set('s-g',s.g); set('s-g2',s.v-1); set('s-j',s.j); set('s-j2b',s.g-1); set('s-j2',s.j-1);
     let h = '';
@@ -366,7 +396,10 @@ function renderMois(){
       kpi(fmtMin(g.totalMinutes),'ce mois-ci') + kpi(g.joursLus,'jours lus') +
       kpi(g.livresTermines,'livres terminés') +
       kpi((g.joursLus ? Math.round(g.totalMinutes/g.joursLus) : 0)+' min','moy. / jour lu');
-  }).catch(e => { document.getElementById('cal').innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur')+'</p>'; });
+  }).catch(e => {
+    if(my !== moisReq) return;
+    document.getElementById('cal').innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur')+'</p>';
+  });
 }
 function jourDetail(date){
   const wrap = document.createElement('div');
@@ -377,15 +410,17 @@ function jourDetail(date){
 /* ================= STATS ================= */
 function statsNav(d){ STA.y += d; renderStats(); }
 function renderStats(){
+  const my = ++staReq;
   document.getElementById('stats-annee').textContent = STA.y;
   const body = document.getElementById('stats-body');
   const anneeCourante = (BOOT && BOOT.anneeCourante) || new Date().getFullYear();
   if(BOOT && BOOT.stats && STA.y === anneeCourante) drawStats(BOOT.stats);   // rendu instantané
   else body.innerHTML = '<div class="spin"></div>';
   api('stats', { year: STA.y }).then(s => {
+    if(my !== staReq || s.year !== STA.y) return;
     if(STA.y === anneeCourante && BOOT) BOOT.stats = s;
     drawStats(s);
-  }).catch(e => { if(!body.querySelector('.kpis')) body.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne — reviens plus tard.':'Erreur : '+e.message)+'</p>'; });
+  }).catch(e => { if(my === staReq && !body.querySelector('.kpis')) body.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne — reviens plus tard.':'Erreur : '+e.message)+'</p>'; });
 }
 function drawStats(s){
   const body = document.getElementById('stats-body');
@@ -433,32 +468,95 @@ function renderLivresView(){
   document.getElementById('livres-filtres').innerHTML =
     ['Tous','En cours','En pause','Terminé','À lire','Abandonné']
       .map(o => '<button class="'+(o===FILTRE?'on':'')+'" onclick="setFiltre(\''+o+'\')">'+o+'</button>').join('');
+  const nb = fltActifs();
+  document.getElementById('livres-plus').textContent = 'Filtres ' + (FILTRES_OUV?'▴':'▾') + (nb?' ('+nb+')':'');
+  const panel = document.getElementById('livres-filtres-plus');
+  panel.hidden = !FILTRES_OUV;
+  if(FILTRES_OUV) panel.innerHTML = filtresPlusHtml();
   renderLivres();
 }
+function fltActifs(){ return (FLT.format?1:0)+(FLT.nature?1:0)+(FLT.note?1:0); }
+function toggleFiltres(){ FILTRES_OUV = !FILTRES_OUV; renderLivresView(); }
+function filtresPlusHtml(){
+  const js = s => String(s).replace(/'/g,"\\'");
+  const chip = (txt,on,call) => '<button class="'+(on?'on':'')+'" onclick="'+call+'">'+esc(txt)+'</button>';
+  const seg = (lbl,inner) => '<div class="flt-lbl">'+lbl+'</div><div class="seg">'+inner+'</div>';
+  const F = (BOOT.formats||[]).map(f => chip(f, FLT.format===f, "setFlt('format','"+js(f)+"')")).join('');
+  const N = (BOOT.natures||[]).map(x => chip(x, FLT.nature===x, "setFlt('nature','"+js(x)+"')")).join('');
+  const notes = [0,3,4,5].map(v => chip(v===0?'Toutes':v+'★+', FLT.note===v, 'setFltNote('+v+')')).join('');
+  return seg('Format', chip('Tous', !FLT.format, "setFlt('format','')")+F)+
+         seg('Nature', chip('Toutes', !FLT.nature, "setFlt('nature','')")+N)+
+         seg('Note', notes)+
+         '<label class="row" style="gap:8px;margin-top:10px;font-size:13px">'+
+           '<input type="checkbox" style="width:auto"'+(GROUPE?' checked':'')+' onchange="setGroupe(this.checked)"> Grouper les séries</label>';
+}
 function setFiltre(o){ FILTRE = o; renderLivresView(); }
+function setFlt(k,v){ FLT[k] = v; renderLivresView(); }
+function setFltNote(v){ FLT.note = v; renderLivresView(); }
+function setGroupe(b){ GROUPE = b; renderLivres(); }
 function setTri(btn){
   TRI = btn.dataset.tri;
   document.querySelectorAll('#v-livres .seg button[data-tri]').forEach(b => b.classList.toggle('on', b === btn));
   renderLivres();
 }
 function byRecent(a,b){ return (b.derniere||'').localeCompare(a.derniere||''); }
+function livresCmp(){
+  if(TRI==='temps') return (a,b) => b.totalMinutes - a.totalMinutes;
+  if(TRI==='titre') return (a,b) => a.titre.localeCompare(b.titre,'fr');
+  return byRecent;
+}
+function livreMatch(x,q){
+  return (FILTRE==='Tous' || x.statut===FILTRE)
+    && (!FLT.format || x.format===FLT.format)
+    && (!FLT.nature || x.nature===FLT.nature)
+    && (!FLT.note || Math.round(x.note||0) >= FLT.note)
+    && x.titre.toLowerCase().indexOf(q) >= 0;
+}
 function renderLivres(){
   const q = (document.getElementById('livres-q').value || '').toLowerCase();
-  let arr = BOOT.livres.filter(x => (FILTRE==='Tous' || x.statut===FILTRE) && x.titre.toLowerCase().indexOf(q) >= 0);
-  if(TRI==='temps') arr.sort((a,b) => b.totalMinutes - a.totalMinutes);
-  else if(TRI==='titre') arr.sort((a,b) => a.titre.localeCompare(b.titre,'fr'));
-  else arr.sort(byRecent);
-  document.getElementById('livres-list').innerHTML = arr.map(x =>
-    '<button class="li" onclick="openLivre(this.dataset.t)" data-t="'+escAttr(x.titre)+'">'+
-      '<span class="badge">'+fmtMinShort(x.totalMinutes)+'</span>'+
-      '<span class="grow"><span class="t">'+(x.favori?'★ ':'')+esc(x.titre)+'</span>'+
-      '<span class="sub">'+x.joursActifs+' j actifs'+
-        (x.joursDepuis!=null ? ' · '+(x.joursDepuis===0?"aujourd'hui":'il y a '+x.joursDepuis+' j') : '')+
-        (x.note ? ' · '+'★'.repeat(Math.round(x.note)) : '')+'</span>'+
-      '<span class="tags"><span class="chip">'+x.format+'</span><span class="chip">'+x.nature+'</span><span class="chip">'+x.statut+'</span></span>'+
-    '</span></button>'
-  ).join('') || '<p class="muted pad">Aucun livre.</p>';
+  const cmp = livresCmp();
+  const arr = BOOT.livres.filter(x => livreMatch(x,q)).sort(cmp);
+  document.getElementById('livres-count').textContent =
+    arr.length + (arr.length>1?' livres':' livre') + ' · ' + fmtMinShort(arr.reduce((s,x)=>s+x.totalMinutes,0));
+  document.getElementById('livres-list').innerHTML =
+    (GROUPE ? livresGroupesHtml(arr,cmp) : arr.map(livreRow).join('')) || '<p class="muted pad">Aucun livre.</p>';
 }
+function livreRow(x){
+  return '<button class="li" onclick="openLivre(this.dataset.t)" data-t="'+escAttr(x.titre)+'">'+
+    '<span class="badge">'+fmtMinShort(x.totalMinutes)+'</span>'+
+    '<span class="grow"><span class="t">'+(x.favori?'★ ':'')+esc(x.titre)+'</span>'+
+    '<span class="sub">'+x.joursActifs+' j actifs'+
+      (x.joursDepuis!=null ? ' · '+(x.joursDepuis===0?"aujourd'hui":'il y a '+x.joursDepuis+' j') : '')+
+      (x.note ? ' · '+'★'.repeat(Math.round(x.note)) : '')+'</span>'+
+    '<span class="tags"><span class="chip">'+esc(x.format)+'</span><span class="chip">'+esc(x.nature)+'</span><span class="chip">'+esc(x.statut)+'</span></span>'+
+  '</span></button>';
+}
+/* série = titre sans le marqueur de tome final (T11, - Tome 3, Volume 2, Intégrale 1…) */
+function serieStem(titre){
+  return String(titre).replace(/[\s.\-–—]+(?:int[ée]grale|tome|volume|vol|t)\.?\s*\d+\s*$/i,'').trim();
+}
+function livresGroupesHtml(arr,cmp){
+  const g = {}, order = [];
+  arr.forEach(x => { const s = serieStem(x.titre); (g[s] || (order.push(s), g[s]=[])).push(x); });
+  return order.map(stem => {
+    const items = g[stem];
+    if(items.length < 2) return livreRow(items[0]);
+    items.sort(cmp);
+    const tot = items.reduce((s,x)=>s+x.totalMinutes,0);
+    const finis = items.filter(x=>x.statut==='Terminé').length;
+    const open = !!SERIES_OUV[stem];
+    return '<div class="serie">'+
+      '<button class="li serie-h" onclick="toggleSerie(this.dataset.s)" data-s="'+escAttr(stem)+'">'+
+        '<span class="badge">'+fmtMinShort(tot)+'</span>'+
+        '<span class="grow"><span class="t">'+esc(stem)+' <span class="muted">· '+items.length+' tomes</span></span>'+
+        '<span class="sub">'+finis+'/'+items.length+' terminés</span></span>'+
+        '<span class="serie-chev">'+(open?'▴':'▾')+'</span>'+
+      '</button>'+
+      (open ? '<div class="serie-body">'+items.map(livreRow).join('')+'</div>' : '')+
+    '</div>';
+  }).join('');
+}
+function toggleSerie(s){ SERIES_OUV[s] = !SERIES_OUV[s]; renderLivres(); }
 function openLivre(t){ editLivre(BOOT.livres.filter(l => l.titre === t)[0] || null); }
 function editLivre(l, apres){
   l = l || { titre:'', format:'', nature:'', statut:'À lire', serie:'', note:0, commentaire:'', alias:'' };
@@ -501,23 +599,44 @@ function fusionner(cible){
 /* ================= JOURNAL ================= */
 function drawJournal(rows){
   const el = document.getElementById('journal-list');
-  rows = pendingFor(null).concat(rows);
+  const fL = (document.getElementById('jr-livre').value || '').toLowerCase().trim();
+  const fM = document.getElementById('jr-mois').value || '';              // 'yyyy-MM'
+  let all = pendingFor(null).concat(rows);
+  if(fL) all = all.filter(r => String(r.livre).toLowerCase().indexOf(fL) >= 0);
+  if(fM) all = all.filter(r => String(r.date).slice(0,7) === fM);
+  document.getElementById('jr-clear').hidden = !(fL || fM);
   const grp = {}, order = [];
-  rows.forEach(r => { if(!grp[r.date]){ grp[r.date] = []; order.push(r.date); } grp[r.date].push(r); });
+  all.forEach(r => { if(!grp[r.date]){ grp[r.date] = []; order.push(r.date); } grp[r.date].push(r); });
   order.sort().reverse();
-  el.innerHTML = order.map(d => {
-    const tot = grp[d].reduce((s,r) => s + r.minutes, 0);
-    return '<div class="row" style="justify-content:space-between;margin:16px 2px 6px"><b>'+dateFr(d)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>'+
-      '<div class="card">'+grp[d].map(sessionRow).join('')+'</div>';
-  }).join('') || '<p class="muted">Aucune session.</p>';
+  if(!order.length){ el.innerHTML = '<p class="muted">Aucune session'+((fL||fM)?' pour ce filtre':'')+'.</p>'; return; }
+  const totG = all.reduce((s,r) => s + r.minutes, 0);
+  el.innerHTML =
+    ((fL||fM) ? '<div class="row" style="justify-content:space-between;margin:2px 2px 4px"><span class="muted">'+all.length+' séance'+(all.length>1?'s':'')+'</span><span class="muted">'+fmtMinShort(totG)+'</span></div>' : '')+
+    order.map(d => {
+      const tot = grp[d].reduce((s,r) => s + r.minutes, 0);
+      return '<div class="row" style="justify-content:space-between;margin:16px 2px 6px"><b>'+dateFr(d)+'</b><span class="muted">'+fmtMinShort(tot)+'</span></div>'+
+        '<div class="card">'+grp[d].map(sessionRow).join('')+'</div>';
+    }).join('');
+}
+function filtreJournal(){ drawJournal(journalRows); }
+function journalClear(){
+  document.getElementById('jr-livre').value = '';
+  document.getElementById('jr-mois').value = '';
+  drawJournal(journalRows);
 }
 function renderJournal(){
   const el = document.getElementById('journal-list');
-  const seed = (BOOT && BOOT.sessionsRecent) || [];
-  if(seed.length) drawJournal(seed); else el.innerHTML = '<div class="spin"></div>';
+  const dl = document.getElementById('jr-dl');
+  if(dl && BOOT && BOOT.livres) dl.innerHTML = BOOT.livres.map(x => '<option value="'+escAttr(x.titre)+'">').join('');
+  if(!journalRows.length){
+    const seed = (BOOT && BOOT.sessionsRecent) || [];
+    if(seed.length) journalRows = seed;
+  }
+  if(journalRows.length) drawJournal(journalRows); else el.innerHTML = '<div class="spin"></div>';
   api('sessions', { limit: 500 }).then(rows => {
     if(BOOT) BOOT.sessionsRecent = rows.slice(0, 150);
-    drawJournal(rows);
+    journalRows = rows;
+    drawJournal(journalRows);
   }).catch(e => { if(!el.querySelector('.card')) el.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur : '+e.message)+'</p>'; });
 }
 const SESS = {};
