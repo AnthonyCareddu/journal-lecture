@@ -140,6 +140,11 @@ nav.bottom button.on{color:var(--accent)}
 .serie-h .serie-chev{color:var(--ink-soft);font-size:12px;padding-left:6px}
 .serie-body{border-top:1px solid var(--line)}
 .serie-body .li{padding-left:22px}
+.livre-stats{margin-bottom:14px;padding:6px 14px}
+.livre-stats .ls-row{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:6px 0}
+.livre-stats .ls-row:not(:last-child){border-bottom:1px solid var(--line)}
+.livre-stats .ls-row span{color:var(--ink-soft)}
+.livre-stats .ls-row b{text-align:right;font-weight:600}
 
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--ink-soft);margin-right:4px}
 .dot.chrono{background:var(--accent)} .dot.manuel{background:var(--violet)} .dot.import{background:var(--ink-soft)}

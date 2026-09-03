@@ -325,6 +325,8 @@ const ALIAS_MANUELS = {
   'Brigthest Day - T1': 'Brightest Day T1',
   'Brigthest Day - T2': 'Brightest Day T2',
   'Brigthest Day - T3': 'Brightest Day T3',
+  'Batman Chronicles - 1988 V1': 'Batman Chronicles 1988 Volume 1',
+  'Transfomers T03': 'Transformers T03',
 };
 
 function canon_(titre) {
@@ -339,7 +341,9 @@ var TERMINES_MANUELS = {
   'Chroniques du chevalier errant': 1,
   'Feu et sang: Intégrale': 1,
   'Le Trône de fer Intégrale 1': 1,
-  'Mashle - T17': 1
+  'Mashle - T17': 1,
+  'Hellblazer': 1,
+  'Batman Chronicles 1988 Volume 1': 1
 };
 var ABANDONNES_MANUELS = {
   'Dune - La Communauté des sœurs': 1
@@ -358,7 +362,7 @@ function devineFormat_(titre) {
            'omniscient reader', 'harpe des quatre', 'the marshal king', 'from fps to rpg', 'druid of seoul station'])) return 'Manhwa';
   if (has(['batman', 'superman', 'justice league', 'injustice', 'joker', 'dceased', 'dc vampires', 'green lantern',
            'blackest night', 'brightest day', 'brigthest', 'crisis on infinite', 'transmetropolitan', 'y le dernier homme',
-           'saga -', 'saga –', 'fables', 'planetary', 'transformers', 'void rival', 'gi joe', 'g.i. joe', 'cobra', 'duke',
+           'saga -', 'saga –', 'fables', 'planetary', 'transformers', 'transfomers', 'void rival', 'gi joe', 'g.i. joe', 'cobra', 'duke',
            'destro', 'scarlet', 'walking dead', 'twd', 'clementine', 'civil war', 'house of m', 'siege', 'daredevil',
            'nightwing', 'robin infinite', 'harley quinn', 'wonder woman infinite', 'swamp thing', 'red hood', 'gotham central',
            'top 10', 'punk rock jesus', 'v pour vendetta', 'hellblazer', 'mister miracle', 'super sons', 'jurassic league',
@@ -545,15 +549,15 @@ function diagnostic() {
 
 /**
  * À LANCER UNE FOIS depuis l'éditeur (bouton Exécuter). Idempotent (ré-exécutable sans dégât).
- * Corrige les livres mal classés par la migration :
- *   - la cellule à 2 titres « Chevalier errant ⏎ Walking Dead T13 » du 15/09/2025 :
- *     ce jour-là tu as FINI le Chevalier errant ET lu Walking Dead T13. La migration
- *     n'en avait fait qu'un livre bâtard. → on garde la séance sur « Chevalier errant »
- *     (fini) et on recrée « Walking Dead T13 » (fini) avec sa propre séance ce jour-là.
- *   - passe en « Terminé » des livres finis jamais marqués 100 %
- *   - passe en « Abandonné » le livre marqué STOP dans l'ancien journal
- * Non destructif : ne touche qu'au statut de ces livres (+ 1 fusion + 1 séance ajoutée).
- * Les cas ambigus sont seulement listés — à trancher dans l'app.
+ * Rattrape les livres mal classés / mal nommés par la migration :
+ *   - cellule à 2 titres « Chevalier errant ⏎ Walking Dead T13 » (15/09/2025) : sépare
+ *     les deux livres (Chevalier errant fini + Walking Dead T13 recréé, fini)
+ *   - fusionne « Batman Chronicles - 1988 V1 » et « … 1988 Volume 1 » (même livre)
+ *   - passe en « Terminé » des livres finis jamais marqués 100 % (avec dates confirmées
+ *     à la main pour Batman Chronicles 1988 Vol.1 et Hellblazer)
+ *   - « Abandonné » pour le livre marqué STOP
+ *   - renomme les coquilles (« Transfomers T03 » → « Transformers T03 »)
+ * Ne touche qu'à ces livres. Les cas encore ambigus sont seulement listés (log).
  */
 function corrigerStatuts() {
   _resetCaches_();
@@ -577,15 +581,42 @@ function corrigerStatuts() {
     log.push('Créé : Walking Dead T13 (Terminé, 15/09/2025)');
   }
 
-  // 2) finis mais jamais marqués 100 % dans l'ancien journal
+  // 2) « Batman Chronicles - 1988 V1 » et « … 1988 Volume 1 » = le même livre
+  if (_findLivreRow('Batman Chronicles - 1988 V1') > 0 && _findLivreRow('Batman Chronicles 1988 Volume 1') > 0) {
+    mergeBooks(['Batman Chronicles - 1988 V1'], 'Batman Chronicles 1988 Volume 1');
+    log.push('Fusionné : « Batman Chronicles - 1988 V1 » → « Batman Chronicles 1988 Volume 1 »');
+  }
+
+  // 3) finis mais jamais marqués 100 % dans l'ancien journal
   ['Feu et sang: Intégrale', 'Le Trône de fer Intégrale 1',
    'Chroniques du chevalier errant', 'Mashle - T17'].forEach(t => setStatut(t, 'Terminé'));
 
-  // 3) abandon explicite (marqueur STOP)
+  // 4) finis avec dates confirmées à la main (statut + date_debut + date_fin)
+  [
+    ['Batman Chronicles 1988 Volume 1', '2025-07-15', '2025-07-18'],
+    ['Hellblazer',                       '2025-04-14', '2025-04-20']
+  ].forEach(([t, deb, fin]) => {
+    if (_findLivreRow(t) > 0) {
+      saveBook({ titreOriginal: t, titre: t, statut: 'Terminé', date_debut: deb, date_fin: fin });
+      _resetCaches_();
+      log.push('Terminé : ' + t + ' (' + deb + ' → ' + fin + ')');
+    } else log.push('(introuvable) ' + t);
+  });
+
+  // 5) abandon explicite (marqueur STOP)
   ['Dune - La Communauté des sœurs'].forEach(t => setStatut(t, 'Abandonné'));
 
-  // 4) à trancher toi-même dans l'app (Abandonné ou vraie pause)
-  log.push('--- à voir dans l\'app : TBATE · Batman Chronicles - 1988 V1 · Hellblazer · The wold after the fall');
+  // 6) coquilles de l'ancien journal (renomme la fiche + ses séances)
+  [['Transfomers T03', 'Transformers T03']].forEach(([de, vers]) => {
+    if (_findLivreRow(de) > 0 && _findLivreRow(vers) < 0) {
+      saveBook({ titreOriginal: de, titre: vers, format: 'Comics', nature: 'Parallèle' });
+      _resetCaches_();
+      log.push('Renommé : ' + de + ' → ' + vers);
+    }
+  });
+
+  // 7) reste à trancher toi-même dans l'app (Abandonné ou vraie pause)
+  log.push('--- à voir dans l\'app : TBATE · The wold after the fall');
 
   _resetCaches_();
   SpreadsheetApp.flush();
@@ -1003,11 +1034,12 @@ function saveBook(p) {
     _resetCaches_();
   }
 
-  _upsertLivre(nouveau, {
-    format: p.format, nature: p.nature, statut: p.statut, serie: p.serie || '',
-    note: p.note || '', commentaire: p.commentaire || '',
-    date_debut: p.date_debut || '', date_fin: p.date_fin || '', alias: p.alias || '',
-  });
+  // ne patcher que les champs réellement fournis (ne pas effacer date_fin / note / alias
+  // quand l'app envoie un formulaire qui ne les contient pas)
+  const patch = {};
+  ['format', 'nature', 'statut', 'serie', 'note', 'commentaire', 'date_debut', 'date_fin', 'alias']
+    .forEach(k => { if (p[k] !== undefined) patch[k] = p[k]; });
+  _upsertLivre(nouveau, Object.keys(patch).length ? patch : null);
   if (p.definirChrono) _setFavori_(nouveau);
 
   _resetCaches_();

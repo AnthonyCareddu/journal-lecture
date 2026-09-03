@@ -531,9 +531,9 @@ function livreRow(x){
     '<span class="tags"><span class="chip">'+esc(x.format)+'</span><span class="chip">'+esc(x.nature)+'</span><span class="chip">'+esc(x.statut)+'</span></span>'+
   '</span></button>';
 }
-/* série = titre sans le marqueur de tome final (T11, - Tome 3, Volume 2, Intégrale 1…) */
+/* série = titre sans le marqueur de tome final (T11, - Tome 3, Volume 2, V1, Intégrale 1…) */
 function serieStem(titre){
-  return String(titre).replace(/[\s.\-–—]+(?:int[ée]grale|tome|volume|vol|t)\.?\s*\d+\s*$/i,'').trim();
+  return String(titre).replace(/[\s.\-–—]+(?:int[ée]grale|tome|volume|vol|v|t)\.?\s*\d+\s*$/i,'').trim();
 }
 function livresGroupesHtml(arr,cmp){
   const g = {}, order = [];
@@ -558,6 +558,26 @@ function livresGroupesHtml(arr,cmp){
 }
 function toggleSerie(s){ SERIES_OUV[s] = !SERIES_OUV[s]; renderLivres(); }
 function openLivre(t){ editLivre(BOOT.livres.filter(l => l.titre === t)[0] || null); }
+/* encart récap (lecture) dans la fiche d'un livre existant */
+function livreStatsHtml(l){
+  if(!l || !l.sessionsCount) return '';
+  const d = x => x ? dateFr(x) : '—';
+  const finLbl = l.statut==='Terminé' ? 'Terminé le' : (l.statut==='Abandonné' ? 'Arrêté le' : 'Dernière séance');
+  const parSeance = Math.round(l.totalMinutes / l.sessionsCount);
+  const classes = BOOT.livres.filter(x => x.totalMinutes > 0).sort((a,b) => b.totalMinutes - a.totalMinutes);
+  const rank = classes.findIndex(x => x.titre === l.titre) + 1;
+  const R = [
+    ['Commencé', d(l.debut)],
+    [finLbl, d(l.fin)],
+  ];
+  if(l.dureeCal) R.push(['Étalé sur', l.dureeCal+' j'+(l.joursActifs?' · '+l.joursActifs+' j lus':'')]);
+  R.push(['Temps de lecture', fmtMin(l.totalMinutes)+' · '+l.sessionsCount+' séance'+(l.sessionsCount>1?'s':'')+(parSeance?' · ~'+parSeance+' min/séance':'')]);
+  if(l.moyJourActif) R.push(['Rythme', l.moyJourActif+' min / jour lu']);
+  if(rank && rank<=15 && l.totalMinutes>=60) R.push(['Classement', '#'+rank+' de tes lectures les plus longues']);
+  return '<div class="card pad livre-stats">'+
+    R.map(r => '<div class="ls-row"><span>'+esc(r[0])+'</span><b>'+esc(r[1])+'</b></div>').join('')+
+  '</div>';
+}
 function editLivre(l, apres){
   l = l || { titre:'', format:'', nature:'', statut:'À lire', serie:'', note:0, commentaire:'', alias:'' };
   const neuf = !l.titre || !BOOT.livres.some(x => x.titre === l.titre);
@@ -571,7 +591,8 @@ function editLivre(l, apres){
     '<div class="field"><label>Note</label><div class="seg" id="e-note">'+[0,1,2,3,4,5].map(x => segb(x||'—', x===Math.round(l.note||0), x)).join('')+'</div></div>'+
     '<div class="field"><label>Commentaire</label><textarea id="e-c" rows="2">'+esc(l.commentaire||'')+'</textarea></div>'+
     '<label class="row" style="gap:8px;margin-bottom:12px"><input type="checkbox" id="e-chrono" style="width:auto"'+(l.favori?' checked':'')+'> Livre du chrono</label>'+
-    (neuf ? '' : '<div id="e-sessions" style="margin-bottom:12px"></div>'+
+    (neuf ? '' : livreStatsHtml(l)+
+      '<div id="e-sessions" style="margin-bottom:12px"></div>'+
       '<button class="btn ghost sm" onclick="fusionner(this.dataset.t)" data-t="'+escAttr(l.titre)+'">Fusionner avec un autre titre…</button>');
   modal(neuf ? 'Nouveau livre' : l.titre, html, [{t:'Fermer',c:closeModal},{t:'Enregistrer',p:1,c:function(){
     const p = { titreOriginal:l.titre, titre:document.getElementById('e-t').value.trim(),
