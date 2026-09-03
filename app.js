@@ -68,6 +68,75 @@ async function mut(action, payload){
   }
 }
 
+/* ------------------------------------------------ écriture optimiste --- */
+/* Applique la modif localement tout de suite (rendu instantané), puis
+   synchronise en arrière-plan. La réponse serveur recale l'état exact.   */
+function rechargerBoot(){ return api('bootstrap').then(b => { setBoot(b); renderActif(); }).catch(function(){}); }
+
+function livreLocal(titre){ return ((BOOT && BOOT.livres) || []).filter(x => x.titre === titre)[0] || null; }
+function patchLivre(titre, patch){ const l = livreLocal(titre); if(l) Object.assign(l, patch); return l; }
+function setFavoriLocal(titre){
+  ((BOOT && BOOT.livres) || []).forEach(l => { l.favori = (l.titre === titre); });
+  if(BOOT) BOOT.livreChrono = titre;
+}
+function addSessionLocal(p){
+  const min = Math.max(0, Math.round(+p.minutes || 0));
+  const s = { id:'opt-'+Date.now(), date:p.date, livre:p.livre, minutes:min, source:p.source||'manuel', note:p.note||'' };
+  BOOT.sessionsRecent = [s].concat(BOOT.sessionsRecent || []);
+  let l = livreLocal(p.livre);
+  if(!l){
+    l = { titre:p.livre, format:'Autre', nature:'Parallèle', statut:'En cours', serie:'', favori:false,
+      note:0, commentaire:'', alias:'', totalMinutes:0, sessionsCount:0, joursActifs:0,
+      premiere:p.date, derniere:p.date, debut:p.date, fin:'', dureeCal:1, moyJourActif:0, joursDepuis:0 };
+    BOOT.livres.push(l);
+  }
+  l.totalMinutes = (l.totalMinutes||0) + min;
+  l.sessionsCount = (l.sessionsCount||0) + 1;
+  if(!l.premiere || p.date < l.premiere){ l.premiere = p.date; if(!l.debut) l.debut = p.date; }
+  if(!l.derniere || p.date > l.derniere) l.derniere = p.date;
+  l.joursDepuis = 0;
+  if(p.termine){ l.statut = 'Terminé'; l.fin = p.date; }
+  else if(['En pause','À lire','Abandonné'].indexOf(l.statut) >= 0) l.statut = 'En cours';
+}
+function deleteSessionLocal(id){
+  const list = BOOT.sessionsRecent || [];
+  const s = list.filter(x => x.id === id)[0];
+  BOOT.sessionsRecent = list.filter(x => x.id !== id);
+  if(s){ const l = livreLocal(s.livre); if(l){ l.totalMinutes = Math.max(0,(l.totalMinutes||0) - s.minutes); l.sessionsCount = Math.max(0,(l.sessionsCount||0) - 1); } }
+}
+function updateSessionLocal(p){
+  const s = (BOOT.sessionsRecent || []).filter(x => x.id === p.id)[0];
+  if(!s) return;
+  const oldMin = s.minutes, oldLivre = s.livre;
+  if(p.date != null) s.date = p.date;
+  if(p.livre != null) s.livre = p.livre;
+  if(p.minutes != null) s.minutes = Math.max(0, Math.round(+p.minutes || 0));
+  if(p.note != null) s.note = p.note;
+  const adj = (t, d) => { const l = livreLocal(t); if(l) l.totalMinutes = Math.max(0,(l.totalMinutes||0) + d); };
+  if(oldLivre === s.livre) adj(s.livre, s.minutes - oldMin);
+  else { adj(oldLivre, -oldMin); adj(s.livre, s.minutes); }
+}
+
+function mutOpt(action, payload, patchLocal){
+  try{ patchLocal(); }catch(e){}
+  setBoot(BOOT);                 // persiste le patch + vide les caches dérivés
+  renderActif();
+  return api(action, payload).then(r => {
+    if(r && r.bootstrap){ setBoot(r.bootstrap); renderActif(); }
+    return r || {};
+  }).catch(e => {
+    if(e.message === 'network' || e.message === 'unauthorized'){
+      const q = store.queue; q.push({ action: action, payload: payload }); store.queue = q;
+      updateOfflineUi();
+      if(e.message === 'unauthorized') scheduleReauth();
+      return { offline: true };
+    }
+    toast('Erreur : ' + (e.message || e), true);
+    rechargerBoot();
+    return { error: true };
+  });
+}
+
 /* ------------------------------------------------------------------- AUTH -- */
 const $ = (s, r=document) => r.querySelector(s);
 
@@ -131,9 +200,11 @@ var TRI='recent', FILTRE='En cours';
 var FLT={format:'',nature:'',note:0}, FILTRES_OUV=false, GROUPE=true, SERIES_OUV={};
 var CH={running:false,paused:false,started:0,acc:0,resume:0,livre:''};
 var moisReq=0, staReq=0, journalRows=[];
+var moisCache={}, staCache={};
 
 function setBoot(b){
   BOOT = b; store.bootCache = b;
+  moisCache = {}; staCache = {};       // caches dérivés -> recalculés à la prochaine visite
 }
 
 async function bootApp(){
@@ -304,11 +375,10 @@ function terminer(){
       const payload = { date: BOOT.today, livre: l, minutes: +document.getElementById('f-min').value,
         note: document.getElementById('f-note').value, source: 'chrono', termine: document.getElementById('f-fin').checked };
       if(!(payload.minutes > 0)){ toast('Durée invalide', true); return; }
-      mut('addSession', payload).then(r => {
-        annuler(); closeModal();
-        toast(r.offline ? 'Séance enregistrée hors ligne' : (r.message || 'Séance enregistrée'));
-        renderActif();
-      }).catch(err);
+      closeModal(); annuler();
+      mutOpt('addSession', payload, () => addSessionLocal(payload)).then(r => {
+        if(!r.error) toast(r.offline ? 'Séance enregistrée hors ligne' : (r.message || 'Séance enregistrée'));
+      });
     }}]);
 }
 function renderChronoJour(){ renderDayList(document.getElementById('chrono-jour'), BOOT.today, "Aujourd'hui"); }
@@ -350,7 +420,8 @@ function filtLivreListe(){
 function pickLivre(t){
   CH.livre = t; closeModal();
   document.getElementById('chrono-livre').textContent = t;
-  mut('setChrono', { titre: t }).then(() => renderActif());
+  if(livreLocal(t)) mutOpt('setChrono', { titre: t }, () => setFavoriLocal(t));
+  else mut('setChrono', { titre: t }).then(() => renderActif());   // livre pas encore en mémoire
   if(window._demApres) demarrer();
 }
 function nouveauDepuisChrono(){
@@ -373,33 +444,98 @@ function moisAujourdhui(){
 function renderMois(){
   const my = ++moisReq;                       // ignore les réponses d'une nav dépassée
   const y = MOIS.y, m = MOIS.m;
+  const key = y + '-' + String(m).padStart(2,'0');
   document.getElementById('mois-titre').textContent = MOIS_NOMS[m-1] + ' ' + y;
   const n = new Date((BOOT && BOOT.today) || Date.now());
   document.getElementById('mois-auj').hidden = (y === n.getFullYear() && m === n.getMonth()+1);
+
+  if(moisCache[key]){ drawMois(moisCache[key]); return; }
+  if(moisCouvertLocalement(y, m)){ const g = moisGridLocal(y, m); moisCache[key] = g; drawMois(g); return; }
+
   document.getElementById('cal').innerHTML = '<div class="spin"></div>';
   api('month', { year: y, month: m }).then(g => {
     if(my !== moisReq || g.year !== MOIS.y || g.month !== MOIS.m) return;
-    const s = g.seuils, set = (cl,v) => document.querySelectorAll('.'+cl).forEach(e => e.textContent = v);
-    set('s-v',s.v); set('s-g',s.g); set('s-g2',s.v-1); set('s-j',s.j); set('s-j2b',s.g-1); set('s-j2',s.j-1);
-    let h = '';
-    g.cells.forEach(c => {
-      if(!c){ h += '<div class="cell empty"></div>'; return; }
-      const bk = c.livres[0] ? c.livres[0].titre : '';
-      h += '<div class="cell '+c.bucket+'" onclick="jourDetail(\''+c.date+'\')">'+
-        (c.finis.length ? '<span class="fin">✓</span>' : '')+
-        '<span class="d">'+c.day+'</span>'+
-        (bk ? '<span class="bk">'+esc(bk)+'</span>' : '')+
-        (c.minutes ? '<span class="m">'+c.minutes+'′</span>' : '')+'</div>';
-    });
-    document.getElementById('cal').innerHTML = h;
-    document.getElementById('mois-resume').innerHTML =
-      kpi(fmtMin(g.totalMinutes),'ce mois-ci') + kpi(g.joursLus,'jours lus') +
-      kpi(g.livresTermines,'livres terminés') +
-      kpi((g.joursLus ? Math.round(g.totalMinutes/g.joursLus) : 0)+' min','moy. / jour lu');
+    moisCache[key] = g;
+    drawMois(g);
   }).catch(e => {
     if(my !== moisReq) return;
     document.getElementById('cal').innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne':'Erreur')+'</p>';
   });
+}
+/* le mois est-il entièrement couvert par les séances déjà en mémoire ? */
+function moisCouvertLocalement(y, m){
+  const rec = (BOOT && BOOT.sessionsRecent) || [];
+  if(!rec.length || !BOOT.livres) return false;
+  let oldest = rec[0].date;
+  for(let i=1;i<rec.length;i++) if(rec[i].date < oldest) oldest = rec[i].date;
+  return (y + '-' + String(m).padStart(2,'0')) > String(oldest).slice(0,7);
+}
+/* grille du mois calculée en local (mêmes règles que getMonthGrid côté serveur) */
+function moisGridLocal(y, m){
+  const mkey = y + '-' + String(m).padStart(2,'0');
+  const r = (BOOT && BOOT.reglages) || {};
+  const seuils = { v:+r.seuil_violet||50, g:+r.seuil_vert||20, j:+r.seuil_jaune||5 };
+  const jours = {};
+  (BOOT.sessionsRecent || []).forEach(s => {
+    if(String(s.date).slice(0,7) !== mkey) return;
+    const j = jours[s.date] || (jours[s.date] = { minutes:0, livres:{} });
+    j.minutes += s.minutes;
+    j.livres[s.livre] = (j.livres[s.livre]||0) + s.minutes;
+  });
+  const finis = {};
+  (BOOT.livres || []).forEach(l => {
+    const jf = l.fin || l.derniere;
+    if(l.statut === 'Terminé' && jf && String(jf).slice(0,7) === mkey) (finis[jf] = finis[jf] || []).push(l.titre);
+  });
+  const first = new Date(Date.UTC(y, m-1, 1));
+  const dec = (first.getUTCDay()+6)%7;
+  const nb = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const cells = [];
+  for(let i=0;i<dec;i++) cells.push(null);
+  for(let d=1; d<=nb; d++){
+    const iso = mkey + '-' + String(d).padStart(2,'0');
+    const jd = jours[iso] || { minutes:0, livres:{} };
+    let bucket = 'zero';
+    if(jd.minutes >= seuils.v) bucket = 'violet';
+    else if(jd.minutes >= seuils.g) bucket = 'vert';
+    else if(jd.minutes >= seuils.j) bucket = 'jaune';
+    else if(jd.minutes >= 1) bucket = 'rouge';
+    cells.push({ day:d, date:iso, minutes:jd.minutes, bucket:bucket,
+      livres:Object.keys(jd.livres).map(t => ({ titre:t, minutes:jd.livres[t] })).sort((a,b) => b.minutes - a.minutes),
+      finis: finis[iso] || [] });
+  }
+  while(cells.length % 7 !== 0) cells.push(null);
+  const tot = Object.keys(jours).reduce((s,k) => s + jours[k].minutes, 0);
+  return { year:y, month:m, cells:cells, totalMinutes:tot,
+    joursLus:Object.keys(jours).filter(k => jours[k].minutes > 0).length,
+    livresTermines:Object.keys(finis).reduce((s,k) => s + finis[k].length, 0), seuils:seuils };
+}
+function drawMois(g){
+  const s = g.seuils, set = (cl,v) => document.querySelectorAll('.'+cl).forEach(e => e.textContent = v);
+  set('s-v',s.v); set('s-g',s.g); set('s-g2',s.v-1); set('s-j',s.j); set('s-j2b',s.g-1); set('s-j2',s.j-1);
+  let h = '';
+  g.cells.forEach(c => {
+    if(!c){ h += '<div class="cell empty"></div>'; return; }
+    const bk = c.livres[0] ? c.livres[0].titre : '';
+    h += '<div class="cell '+c.bucket+'" onclick="jourDetail(\''+c.date+'\')">'+
+      (c.finis.length ? '<span class="fin">✓</span>' : '')+
+      '<span class="d">'+c.day+'</span>'+
+      (bk ? '<span class="bk">'+esc(bk)+'</span>' : '')+
+      (c.minutes ? '<span class="m">'+c.minutes+'′</span>' : '')+'</div>';
+  });
+  document.getElementById('cal').innerHTML = h;
+  const n = new Date((BOOT && BOOT.today) || Date.now());
+  const estCourant = (g.year === n.getFullYear() && g.month === n.getMonth()+1);
+  const nbJours = new Date(g.year, g.month, 0).getDate();
+  const denom = estCourant ? n.getDate() : nbJours;
+  const moyLu = g.joursLus ? Math.round(g.totalMinutes / g.joursLus) : 0;
+  const moyTot = denom ? Math.round(g.totalMinutes / denom) : 0;
+  const objQ = (BOOT && BOOT.reglages) ? +BOOT.reglages.objectif_quotidien_min : 0;
+  document.getElementById('mois-resume').innerHTML =
+    kpi(fmtMin(g.totalMinutes),'ce mois-ci') + kpi(g.joursLus,'jours lus') +
+    kpi(g.livresTermines,'livres terminés') + kpi(moyLu+' min','moy. / jour lu') +
+    '<div class="muted" style="grid-column:1/-1;text-align:center;font-size:12px;margin-top:2px">'+
+      moyTot+' min/jour sur '+denom+' jour'+(denom>1?'s':'')+(objQ?' · objectif '+objQ+' min':'')+'</div>';
 }
 function jourDetail(date){
   const wrap = document.createElement('div');
@@ -411,14 +547,17 @@ function jourDetail(date){
 function statsNav(d){ STA.y += d; renderStats(); }
 function renderStats(){
   const my = ++staReq;
-  document.getElementById('stats-annee').textContent = STA.y;
+  const an = STA.y;
+  document.getElementById('stats-annee').textContent = an;
   const body = document.getElementById('stats-body');
   const anneeCourante = (BOOT && BOOT.anneeCourante) || new Date().getFullYear();
-  if(BOOT && BOOT.stats && STA.y === anneeCourante) drawStats(BOOT.stats);   // rendu instantané
+  const cache = (an === anneeCourante && BOOT && BOOT.stats) ? BOOT.stats : staCache[an];
+  if(cache && cache.year === an) drawStats(cache);       // instantané, jamais la mauvaise année
   else body.innerHTML = '<div class="spin"></div>';
-  api('stats', { year: STA.y }).then(s => {
-    if(my !== staReq || s.year !== STA.y) return;
-    if(STA.y === anneeCourante && BOOT) BOOT.stats = s;
+  api('stats', { year: an }).then(s => {
+    if(my !== staReq || s.year !== an) return;            // réponse d'une nav dépassée -> ignorée
+    staCache[an] = s;
+    if(an === anneeCourante && BOOT) BOOT.stats = s;
     drawStats(s);
   }).catch(e => { if(my === staReq && !body.querySelector('.kpis')) body.innerHTML = '<p class="muted">'+(e.message==='network'?'Hors ligne — reviens plus tard.':'Erreur : '+e.message)+'</p>'; });
 }
@@ -442,17 +581,17 @@ function drawStats(s){
         '<div class="muted" style="font-size:12px;margin-top:6px">'+s.avgPerDayYear+' min/jour · projection '+fmtMin(s.projectionYear)+'</div>'+
       '</div>'+
       '<div class="card pad" style="margin-top:12px"><b>Par mois</b>'+
-        '<div class="mbars">'+s.perMonth.map(v => '<div class="mb" style="height:'+(v/maxM*100)+'%"></div>').join('')+'</div>'+
+        '<div class="mbars">'+s.perMonth.map((v,i) => '<div class="mb" style="height:'+(v/maxM*100)+'%" title="'+MOIS_NOMS[i]+' : '+fmtMin(v)+'"></div>').join('')+'</div>'+
         '<div class="mbars-x">'+MOIS_NOMS.map(n => '<div>'+n[0]+'</div>').join('')+'</div>'+
       '</div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Par format</b><div class="bars">'+
-        s.perFormat.filter(x=>x.minutes>0).map(x => barRow(x.format,x.minutes,maxF)).join('')+'</div></div>'+
       '<div class="card pad" style="margin-top:12px"><b>Par jour de semaine</b><div class="bars">'+
         s.perWeekday.map((v,i) => barRow(JJ[i],v,maxW)).join('')+'</div></div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Top livres (temps)</b><div class="bars">'+
-        s.topBooks.map(x => barRow(x.titre,x.minutes,maxB)).join('')+'</div></div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Par année</b><div class="bars">'+
-        s.perYear.map(x => barRow(x.year+' ('+x.books+' livres)',x.minutes,maxY)).join('')+'</div></div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Par format</b><div class="bars2">'+
+        s.perFormat.filter(x=>x.minutes>0).map(x => barRow2(x.format,x.minutes,maxF)).join('')+'</div></div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Top livres (temps)</b><div class="bars2">'+
+        s.topBooks.map(x => barRow2(x.titre,x.minutes,maxB)).join('')+'</div></div>'+
+      '<div class="card pad" style="margin-top:12px"><b>Par année</b><div class="bars2">'+
+        s.perYear.map(x => barRow2(x.year,x.minutes,maxY,x.books+' livre'+(x.books>1?'s':''))).join('')+'</div></div>'+
       '<p class="muted" style="text-align:center;margin-top:14px;font-size:12px">Total historique : '+fmtMin(s.totalAll)+' · '+s.booksFinishedAll+' livres terminés</p>';
   }
 }
@@ -461,6 +600,12 @@ function barRow(label,val,max){
   return '<div class="bar-row"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(label)+'</span>'+
     '<span class="bar-track"><span class="bar-fill" style="width:'+(val/max*100)+'%"></span></span>'+
     '<span class="muted" style="text-align:right">'+fmtMinShort(val)+'</span></div>';
+}
+/* variante libellé complet au-dessus de la barre (titres longs) */
+function barRow2(label,val,max,sub){
+  return '<div class="bar-row2"><div class="bar-lbl">'+esc(label)+(sub?' <span class="muted">· '+esc(sub)+'</span>':'')+'</div>'+
+    '<div class="bar-line"><span class="bar-track"><span class="bar-fill" style="width:'+(max?val/max*100:0)+'%"></span></span>'+
+    '<span class="muted bar-val">'+fmtMinShort(val)+'</span></div></div>';
 }
 
 /* ================= LIVRES ================= */
@@ -601,7 +746,16 @@ function editLivre(l, apres){
       note:segVal('e-note',true), commentaire:document.getElementById('e-c').value.trim(),
       definirChrono:document.getElementById('e-chrono').checked };
     if(!p.titre){ toast('Titre requis', true); return; }
-    mut('saveBook', p).then(r => { closeModal(); toast(r.offline?'Enregistré hors ligne':'Enregistré'); renderActif(); if(apres)apres(); }).catch(err);
+    closeModal();
+    if(neuf){
+      mut('saveBook', p).then(r => { toast(r.offline?'Enregistré hors ligne':'Enregistré'); renderActif(); if(apres)apres(); }).catch(err);
+    }else{
+      mutOpt('saveBook', p, () => {
+        patchLivre(p.titreOriginal || p.titre, { titre:p.titre, format:p.format, nature:p.nature,
+          statut:p.statut, serie:p.serie, note:p.note, commentaire:p.commentaire });
+        if(p.definirChrono) setFavoriLocal(p.titre);
+      }).then(r => { if(!r.error) toast(r.offline?'Enregistré hors ligne':'Enregistré'); if(apres)apres(); });
+    }
   }}]);
   if(!neuf) renderDayList(document.getElementById('e-sessions'), null, 'Sessions', true, l.titre);
 }
@@ -679,13 +833,19 @@ function editSession(r){
     [{t:'Supprimer',c:function(){
       modal('Supprimer ?','<p class="muted">Supprimer définitivement cette session ('+r.minutes+' min · '+esc(r.livre)+' · '+dateFr(r.date)+') ?</p>',
         [{t:'Non',c:function(){ editSession(r); }},
-         {t:'Oui, supprimer',p:1,c:function(){ mut('deleteSession',{id:r.id}).then(x => { closeModal(); toast(x.offline?'Suppression en attente':'Session supprimée'); renderActif(); }).catch(err); }}]);
+         {t:'Oui, supprimer',p:1,c:function(){
+           closeModal();
+           mutOpt('deleteSession', {id:r.id}, () => deleteSessionLocal(r.id))
+             .then(x => { if(!x.error) toast(x.offline?'Suppression en attente':'Session supprimée'); });
+         }}]);
      }},
      {t:'Enregistrer',p:1,c:function(){
-      mut('updateSession', { id:r.id, livre:document.getElementById('s-livre').value,
+      const up = { id:r.id, livre:document.getElementById('s-livre').value,
         date:document.getElementById('s-date').value, minutes:+document.getElementById('s-min').value,
-        note:document.getElementById('s-note').value })
-        .then(x => { closeModal(); toast(x.offline?'Modif en attente':'Modifié'); renderActif(); }).catch(err);
+        note:document.getElementById('s-note').value };
+      closeModal();
+      mutOpt('updateSession', up, () => updateSessionLocal(up))
+        .then(x => { if(!x.error) toast(x.offline?'Modif en attente':'Modifié'); });
     }}]);
 }
 function ajoutManuel(){
@@ -703,7 +863,9 @@ function ajoutManuel(){
         source:'manuel', termine:document.getElementById('a-fin').checked };
       if(!p.livre){ toast('Livre requis', true); return; }
       if(!(p.minutes > 0)){ toast('Durée invalide', true); return; }
-      mut('addSession', p).then(r => { closeModal(); toast(r.offline?'Séance hors ligne':(r.message||'Ajouté')); renderActif(); }).catch(err);
+      closeModal();
+      mutOpt('addSession', p, () => addSessionLocal(p))
+        .then(r => { if(!r.error) toast(r.offline?'Séance hors ligne':(r.message||'Ajouté')); });
     }}]);
 }
 
@@ -741,9 +903,11 @@ function openReglages(){
     '<button class="btn ghost sm" onclick="closeModal();openSettings()">Réglages avancés</button>'+
     '<p class="muted" style="font-size:11px;margin-top:14px">Journal de Lecture · PWA v1' + (BOOT && BOOT.email ? ' · '+esc(BOOT.email) : '') + '</p>',
     [{t:'Fermer',c:closeModal},{t:'Enregistrer',p:1,c:function(){
-      mut('saveReglages', { objectif_annuel_min:val('r-an'), objectif_quotidien_min:val('r-jour'),
-        seuil_violet:val('r-v'), seuil_vert:val('r-g'), seuil_jaune:val('r-j'), pause_auto_jours:val('r-p') })
-        .then(x => { closeModal(); toast(x.offline?'Réglages en attente':'Réglages enregistrés'); renderActif(); }).catch(err);
+      const rg = { objectif_annuel_min:val('r-an'), objectif_quotidien_min:val('r-jour'),
+        seuil_violet:val('r-v'), seuil_vert:val('r-g'), seuil_jaune:val('r-j'), pause_auto_jours:val('r-p') };
+      closeModal();
+      mutOpt('saveReglages', rg, () => { if(BOOT && BOOT.reglages) Object.assign(BOOT.reglages, rg); })
+        .then(x => { if(!x.error) toast(x.offline?'Réglages en attente':'Réglages enregistrés'); });
     }}]);
 }
 
