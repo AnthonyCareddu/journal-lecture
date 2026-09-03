@@ -4,7 +4,7 @@
  * CONFIG par défaut ci-dessous ; surchargeable via ⚙️ Réglages avancés.
  */
 const DEFAULTS = {
-  API_URL: 'https://script.google.com/macros/s/AKfycbzVItBQYZseU6T_hIHeaXn21vRCKzWT3k43fq4YE30Tid4nMyoMbvM6h5aB1dAJOUTYXA/exec',
+  API_URL: 'https://script.google.com/macros/s/AKfycbz9FB3JSNRygCu4ZC8uYkvNO7W4nzqPlzCS-hEaHMa5faSARLhzvKD7_0QORUVY_PDh3Q/exec',
   GOOGLE_CLIENT_ID: '291608936405-ddbgkq5hchqu42n3k92ajo95guokt6vn.apps.googleusercontent.com',
   SHEET_URL: 'https://docs.google.com/spreadsheets/d/1uCvIGRItUcnlIsNZSl7UXlFm2N-h5_V3lt9u3O2cgyo/edit',
 };
