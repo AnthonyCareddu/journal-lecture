@@ -408,13 +408,24 @@ function importerHistorique(force) {
   const td = today_();
 
   const sessions = [];
-  const livres = {}; // canon -> {aliases:Set, premiere, derniere, minutes, fini}
+  const livres = {}; // canon -> {aliases, premiere, derniere, minutes, fini, stop}
   const ignorees = [];
   let seq = Date.now();
 
+  // Pré-passe : combien de fois chaque titre apparaît SEUL dans une cellule.
+  // Sert à distinguer une vraie cellule à 2 titres (« A ⏎ B ») d'un titre coupé sur 2 lignes.
+  const titresSeuls = {};
+  for (let i = 1; i < vals.length; i++) {
+    const raw = String(vals[i][1] == null ? '' : vals[i][1]);
+    if (raw.indexOf('\n') >= 0) continue;
+    const t = canon_(normTitre_(raw));
+    if (t) titresSeuls[t] = (titresSeuls[t] || 0) + 1;
+  }
+
   for (let i = 1; i < vals.length; i++) {
     const dRaw = vals[i][0];
-    const brut = normTitre_(vals[i][1]);
+    const raw = String(vals[i][1] == null ? '' : vals[i][1]);
+    const brut = normTitre_(raw);
     if ((dRaw === '' || dRaw == null) && !brut) continue;
 
     const date = parseDate_(dRaw, srcTz);
@@ -433,16 +444,22 @@ function importerHistorique(force) {
     // Les lignes à 0 min (jours suivis sans lecture, cases pré-remplies) sont ignorées.
     if (minutes <= 0) continue;
 
-    const titre = canon_(brut);
-    sessions.push([`s${seq++}`, date, titre, minutes, 'import', note, nowIso_()]);
+    // Cellule à 2 titres (« Chevalier errant ⏎ Walking Dead T13 ») -> une séance par titre,
+    // uniquement si le 1er titre est un livre déjà vu seul ailleurs (>= 3 fois).
+    const lignes = raw.split(/\r?\n/).map(s => normTitre_(s)).filter(Boolean);
+    const multi = lignes.length >= 2 && titresSeuls[canon_(lignes[0])] >= 3;
+    const titres = multi ? lignes.map(canon_) : [canon_(brut)];
 
-    const L = livres[titre] || (livres[titre] = { aliases: {}, premiere: date, derniere: date, minutes: 0, fini: false, stop: false });
-    if (brut !== titre) L.aliases[brut] = true;
-    if (date < L.premiere) L.premiere = date;
-    if (date > L.derniere) L.derniere = date;
-    L.minutes += minutes;
-    if (estFini) { L.fini = true; L.finLe = date; }
-    if (estStop) L.stop = true;
+    titres.forEach(titre => {
+      sessions.push(['s' + (seq++), date, titre, minutes, 'import', note, nowIso_()]);
+      const L = livres[titre] || (livres[titre] = { aliases: {}, premiere: date, derniere: date, minutes: 0, fini: false, stop: false });
+      if (!multi && brut !== titre) L.aliases[brut] = true;
+      if (date < L.premiere) L.premiere = date;
+      if (date > L.derniere) L.derniere = date;
+      L.minutes += minutes;
+      if (estFini) { L.fini = true; L.finLe = date; }
+      if (estStop) L.stop = true;
+    });
   }
 
   if (sessions.length) shS.getRange(2, 1, sessions.length, H_SESSIONS.length).setValues(sessions);
@@ -527,12 +544,15 @@ function diagnostic() {
 }
 
 /**
- * À LANCER UNE FOIS depuis l'éditeur (bouton Exécuter).
+ * À LANCER UNE FOIS depuis l'éditeur (bouton Exécuter). Idempotent (ré-exécutable sans dégât).
  * Corrige les livres mal classés par la migration :
- *   - fusionne la cellule à 2 titres « Chevalier errant ⏎ Walking Dead T13 »
+ *   - la cellule à 2 titres « Chevalier errant ⏎ Walking Dead T13 » du 15/09/2025 :
+ *     ce jour-là tu as FINI le Chevalier errant ET lu Walking Dead T13. La migration
+ *     n'en avait fait qu'un livre bâtard. → on garde la séance sur « Chevalier errant »
+ *     (fini) et on recrée « Walking Dead T13 » (fini) avec sa propre séance ce jour-là.
  *   - passe en « Terminé » des livres finis jamais marqués 100 %
  *   - passe en « Abandonné » le livre marqué STOP dans l'ancien journal
- * Non destructif : ne touche qu'au statut de ces livres (+ 1 fusion).
+ * Non destructif : ne touche qu'au statut de ces livres (+ 1 fusion + 1 séance ajoutée).
  * Les cas ambigus sont seulement listés — à trancher dans l'app.
  */
 function corrigerStatuts() {
@@ -545,11 +565,16 @@ function corrigerStatuts() {
     else log.push('(introuvable) ' + titre);
   };
 
-  // 1) cellule à 2 titres — rattacher la séance « 100% » (15/09/2025) au bon livre
+  // 1) cellule à 2 titres du 15/09/2025 — rattacher la séance « 100% » au Chevalier errant…
   const fantome = 'Chroniques du chevalier errant Walking Dead T13';
   if (_findLivreRow(fantome) > 0) {
     mergeBooks([fantome], 'Chroniques du chevalier errant');
     log.push('Fusionné : « ' + fantome + ' » → « Chroniques du chevalier errant »');
+  }
+  // …et matérialiser Walking Dead T13 (lu le même jour, avant la série T14→T33)
+  if (_findLivreRow('Walking Dead T13') < 0) {
+    addSession({ date: '2025-09-15', livre: 'Walking Dead T13', minutes: 20, source: 'import', termine: true });
+    log.push('Créé : Walking Dead T13 (Terminé, 15/09/2025)');
   }
 
   // 2) finis mais jamais marqués 100 % dans l'ancien journal
