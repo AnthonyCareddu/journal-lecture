@@ -61,6 +61,23 @@ var _MEMO = {};    // agrégats dérivés (indexSessions_, livresEnrichis_)
 
 function _resetCaches_() { _CACHE = {}; _MEMO = {}; }
 
+/* Cache inter-requêtes (CacheService) : on met en cache le JSON des onglets, versionné.
+   Toute écriture incrémente la version -> la lecture suivante repart de la feuille. */
+function cacheVer_() {
+  if (_MEMO._ver != null) return _MEMO._ver;
+  var v = '0';
+  try { v = CacheService.getScriptCache().get('VER') || '0'; } catch (_) {}
+  return (_MEMO._ver = v);
+}
+function invaliderCache_() {
+  _CACHE = {}; _MEMO = {};
+  try {
+    var c = CacheService.getScriptCache();
+    var n = (parseInt(c.get('VER') || '0', 10) || 0) + 1;
+    c.put('VER', String(n), 21600);
+  } catch (_) {}
+}
+
 function safeParse_(s) {
   try { return s ? JSON.parse(s) : null; } catch (_) { return null; }
 }
@@ -106,6 +123,9 @@ function doPost(e) {
     if (body.action === 'login') {
       return jsonOut_({ ok: true, data: login_(body.googleToken) });
     }
+    if (body.action === 'ping') {
+      return jsonOut_({ ok: true, data: { rev: '2026-09-cache', now: Date.now() } });
+    }
     var email = verifierSession_(body.token);          // lève 'unauthorized'
     var data = dispatch_(body.action, body.payload || {}, email);
     return jsonOut_({ ok: true, data: data });
@@ -118,7 +138,7 @@ function dispatch_(action, p, email) {
   switch (action) {
     case 'bootstrap':      return getBootstrap(email, { pauseAuto: true });
     case 'month':          return getMonthGrid(+p.year, +p.month);
-    case 'stats':          return getStats(p.year ? +p.year : null);
+    case 'stats':          return getStats(p.year);
     case 'sessions':       return getSessions(p);
     case 'addSession':     return addSession(p);
     case 'updateSession':  return updateSession(p.id, p);
@@ -210,24 +230,39 @@ function normTitre_(t) {
   return String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
 }
 
-/** Lit un onglet comme liste d'objets (clés = en-têtes ligne 1). Mémorisé par requête. */
+/** Lit un onglet comme liste d'objets (clés = en-têtes ligne 1).
+ *  Mémorisé par requête (_CACHE) ET entre requêtes (CacheService, versionné).
+ *  `sessions` est allégé (sans `horodatage`/`_row`) pour tenir dans le cache. */
 function lire_(nom) {
   if (_CACHE[nom]) return _CACHE[nom];
+
+  const ck = 'L_' + nom + '_' + cacheVer_();
+  let scache = null;
+  try { scache = CacheService.getScriptCache().get(ck); } catch (_) {}
+  const hit = safeParse_(scache);
+  if (hit) return (_CACHE[nom] = hit);
+
   const sh = sh_(nom);
   if (!sh) return (_CACHE[nom] = []);
   const vals = sh.getDataRange().getValues();
   if (vals.length < 2) return (_CACHE[nom] = []);
   const hs = vals[0].map(String);
+  const lean = (nom === CFG.T_SESSIONS);   // objets allégés -> tiennent dans le cache
   const out = [];
   for (let i = 1; i < vals.length; i++) {
     const r = vals[i];
     if (r.join('') === '') continue;
     const o = {};
-    for (let j = 0; j < hs.length; j++) o[hs[j]] = r[j];
-    o._row = i + 1;
+    for (let j = 0; j < hs.length; j++) {
+      if (lean && hs[j] === 'horodatage') continue;
+      o[hs[j]] = r[j];
+    }
+    if (!lean) o._row = i + 1;
     out.push(o);
   }
-  return (_CACHE[nom] = out);
+  _CACHE[nom] = out;
+  try { CacheService.getScriptCache().put(ck, JSON.stringify(out), 21600); } catch (_) {}
+  return out;
 }
 
 function reglages_() {
@@ -243,12 +278,12 @@ function ecrireReglage_(cle, valeur) {
   for (let i = 1; i < vals.length; i++) {
     if (String(vals[i][0]) === cle) {
       sh.getRange(i + 1, 2).setValue(valeur);
-      _resetCaches_();
+      invaliderCache_();
       return;
     }
   }
   sh.appendRow([cle, valeur]);
-  _resetCaches_();
+  invaliderCache_();
 }
 
 /* ------------------------------------------------------------------ */
@@ -256,7 +291,7 @@ function ecrireReglage_(cle, valeur) {
 /* ------------------------------------------------------------------ */
 
 function setupBase() {
-  _resetCaches_();
+  invaliderCache_();
   const ss = ss_();
   ss.setSpreadsheetTimeZone(CFG.TZ);
 
@@ -296,7 +331,7 @@ function setupBase() {
   const f1 = ss.getSheetByName('Feuille 1') || ss.getSheetByName('Sheet1');
   if (f1 && ss.getSheets().length > 1 && f1.getLastRow() === 0) ss.deleteSheet(f1);
 
-  _resetCaches_();
+  invaliderCache_();
   return 'Base prête : ' + ss.getSheets().map(s => s.getName()).join(', ');
 }
 
@@ -393,7 +428,7 @@ function devineNature_(titre, format) {
  * sauf si force === true (efface d'abord).
  */
 function importerHistorique(force) {
-  _resetCaches_();
+  invaliderCache_();
   const shS = sh_(CFG.T_SESSIONS), shL = sh_(CFG.T_LIVRES);
   if (!shS || !shL) return { ok: false, message: 'Lance d\'abord setupBase().' };
 
@@ -493,7 +528,7 @@ function importerHistorique(force) {
 
   if (rows.length) shL.getRange(2, 1, rows.length, H_LIVRES.length).setValues(rows);
 
-  _resetCaches_();
+  invaliderCache_();
 
   const totMin = sessions.reduce((s, r) => s + r[3], 0);
   const parAn = {};
@@ -532,7 +567,7 @@ function autoriser() {
 
 /** Contrôle rapide : compteurs de la base (bouton Exécuter). */
 function diagnostic() {
-  _resetCaches_();
+  invaliderCache_();
   const S = lire_(CFG.T_SESSIONS), L = lire_(CFG.T_LIVRES);
   const parAn = {}, parStatut = {}, parFormat = {};
   let tot = 0;
@@ -560,12 +595,12 @@ function diagnostic() {
  * Ne touche qu'à ces livres. Les cas encore ambigus sont seulement listés (log).
  */
 function corrigerStatuts() {
-  _resetCaches_();
+  invaliderCache_();
   const sh = sh_(CFG.T_LIVRES);
   const log = [];
   const setStatut = (titre, statut) => {
     const r = _findLivreRow(titre);
-    if (r > 0) { sh.getRange(r, 4).setValue(statut); _resetCaches_(); log.push(statut + ' : ' + titre); }
+    if (r > 0) { sh.getRange(r, 4).setValue(statut); invaliderCache_(); log.push(statut + ' : ' + titre); }
     else log.push('(introuvable) ' + titre);
   };
 
@@ -598,7 +633,7 @@ function corrigerStatuts() {
   ].forEach(([t, deb, fin]) => {
     if (_findLivreRow(t) > 0) {
       saveBook({ titreOriginal: t, titre: t, statut: 'Terminé', date_debut: deb, date_fin: fin });
-      _resetCaches_();
+      invaliderCache_();
       log.push('Terminé : ' + t + ' (' + deb + ' → ' + fin + ')');
     } else log.push('(introuvable) ' + t);
   });
@@ -610,7 +645,7 @@ function corrigerStatuts() {
   [['Transfomers T03', 'Transformers T03']].forEach(([de, vers]) => {
     if (_findLivreRow(de) > 0 && _findLivreRow(vers) < 0) {
       saveBook({ titreOriginal: de, titre: vers, format: 'Comics', nature: 'Parallèle' });
-      _resetCaches_();
+      invaliderCache_();
       log.push('Renommé : ' + de + ' → ' + vers);
     }
   });
@@ -618,7 +653,7 @@ function corrigerStatuts() {
   // 7) reste à trancher toi-même dans l'app (Abandonné ou vraie pause)
   log.push('--- à voir dans l\'app : TBATE · The wold after the fall');
 
-  _resetCaches_();
+  invaliderCache_();
   SpreadsheetApp.flush();
   Logger.log(log.join('\n'));
   return log.join('\n');
@@ -705,7 +740,7 @@ function appliquerPauseAuto_() {
   const col = sh.getRange(2, 4, last - 1, 1).getValues();   // colonne statut
   cible.forEach(rn => { col[rn - 2][0] = 'En pause'; });
   sh.getRange(2, 4, last - 1, 1).setValues(col);
-  _resetCaches_();
+  invaliderCache_();
 }
 
 function getBootstrap(email, opts) {
@@ -745,10 +780,15 @@ function getMonthGrid(year, month) { // month : 1-12
   // livres terminés ce mois-ci (date_fin dérivée = dernière session)
   const prefixe = year + '-' + String(month).padStart(2, '0');
   const finis = {};
+  const spans = [];   // livres « de fond » en cours de lecture : on relie les jours entre début et fin
   livresEnrichis_().forEach(l => {
     const jf = l.fin || l.derniere;
     if (l.statut === 'Terminé' && jf && jf.slice(0, 7) === prefixe) {
       (finis[jf] = finis[jf] || []).push(l.titre);
+    }
+    if (l.nature === 'Fond' && l.debut && l.fin &&
+        ['En cours', 'En pause', 'Terminé'].indexOf(l.statut) >= 0 && l.debut !== l.fin) {
+      spans.push({ titre: l.titre, debut: l.debut, fin: l.fin });
     }
   });
 
@@ -768,10 +808,12 @@ function getMonthGrid(year, month) { // month : 1-12
     else if (j.minutes >= seuils.g) bucket = 'vert';
     else if (j.minutes >= seuils.j) bucket = 'jaune';
     else if (j.minutes >= 1) bucket = 'rouge';
+    const sp = (j.minutes === 0) ? spans.filter(s => iso >= s.debut && iso <= s.fin) : [];
     cells.push({
       day: d, date: iso, minutes: j.minutes, bucket: bucket,
       livres: Object.keys(j.livres).map(t => ({ titre: t, minutes: j.livres[t] })).sort((a, b) => b.minutes - a.minutes),
       finis: finis[iso] || [],
+      periode: sp.length ? sp[0].titre : '',
     });
   }
   while (cells.length % 7 !== 0) cells.push(null);
@@ -787,21 +829,35 @@ function getMonthGrid(year, month) { // month : 1-12
   };
 }
 
+/** Stats. `year` = un nombre (année) ou 'all' (toutes années).
+ *  TOUT est calculé sur le périmètre demandé : par mois, par format, par jour
+ *  de semaine, top livres, moyenne, série. `perYear` et le record restent globaux. */
 function getStats(year) {
   const anneeAujourdhui = +today_().slice(0, 4);
-  year = year || anneeAujourdhui;
+  const tout = (year === 'all' || year === 'tout');
+  year = tout ? 'all' : (+year || anneeAujourdhui);
+  const yStr = String(year);
+  const dansPerimetre = d => tout || d.slice(0, 4) === yStr;
+
   const sessions = lire_(CFG.T_SESSIONS).map(s => ({ date: d2s_(s.date), livre: normTitre_(s.livre), min: toInt_(s.minutes) }));
   const livres = livresEnrichis_();
+  const fmtDe = {};
+  livres.forEach(l => { fmtDe[l.titre] = l.format || 'Autre'; });
 
-  const parJour = {}, parMois = {}, parAn = {}, parAnLiv = {};
+  const parJourP = {};          // jour -> minutes (périmètre)
+  const parMois = {};           // 1-12 (année demandée uniquement ; pour 'all' : par année, voir perMonth ci-dessous)
+  const parAn = {}, parAnLiv = {};
+  const perFmt = {}, parLivreP = {}, perWd = [0, 0, 0, 0, 0, 0, 0];
+
   sessions.forEach(s => {
-    parJour[s.date] = (parJour[s.date] || 0) + s.min;
     const an = s.date.slice(0, 4);
     parAn[an] = (parAn[an] || 0) + s.min;
-    if (s.date.slice(0, 4) === String(year)) {
-      const mo = parseInt(s.date.slice(5, 7), 10);
-      parMois[mo] = (parMois[mo] || 0) + s.min;
-    }
+    if (!dansPerimetre(s.date)) return;
+    parJourP[s.date] = (parJourP[s.date] || 0) + s.min;
+    if (!tout) parMois[parseInt(s.date.slice(5, 7), 10)] = (parMois[parseInt(s.date.slice(5, 7), 10)] || 0) + s.min;
+    perWd[(new Date(s.date).getDay() + 6) % 7] += s.min;
+    perFmt[fmtDe[s.livre] || 'Autre'] = (perFmt[fmtDe[s.livre] || 'Autre'] || 0) + s.min;
+    parLivreP[s.livre] = (parLivreP[s.livre] || 0) + s.min;
   });
   livres.forEach(l => {
     if (l.statut === 'Terminé' && (l.fin || l.derniere)) {
@@ -810,60 +866,76 @@ function getStats(year) {
     }
   });
 
-  // séries de jours consécutifs (>0 min)
-  const joursLus = Object.keys(parJour).filter(d => parJour[d] > 0).sort();
-  let record = 0, courante = 0;
-  if (joursLus.length) {
-    let run = 1;
-    for (let i = 1; i < joursLus.length; i++) {
-      const diff = (new Date(joursLus[i]) - new Date(joursLus[i - 1])) / 86400000;
-      run = (diff === 1) ? run + 1 : 1;
-      if (run > record) record = run;
-    }
-    record = Math.max(record, 1);
-    const td = today_();
-    let cur = new Date(td);
-    const set = new Set(joursLus);
-    if (!set.has(td)) cur.setDate(cur.getDate() - 1); // aujourd'hui pas encore lu = ok
-    while (set.has(Utilities.formatDate(cur, CFG.TZ, 'yyyy-MM-dd'))) { courante++; cur.setDate(cur.getDate() - 1); }
+  // record de jours consécutifs — global (lifetime)
+  const jTousSet = sessionsJoursTous_(sessions);
+  const jListe = Object.keys(jTousSet).sort();
+  let record = 1, courante = 0, run = 1;
+  for (let i = 1; i < jListe.length; i++) {
+    const diff = (new Date(jListe[i]) - new Date(jListe[i - 1])) / 86400000;
+    run = (diff === 1) ? run + 1 : 1;
+    if (run > record) record = run;
+  }
+  if (!jListe.length) record = 0;
+  // série en cours (aujourd'hui)
+  {
+    const td = today_(); let cur = new Date(td);
+    if (!jTousSet[td]) cur.setDate(cur.getDate() - 1);
+    while (jTousSet[Utilities.formatDate(cur, CFG.TZ, 'yyyy-MM-dd')]) { courante++; cur.setDate(cur.getDate() - 1); }
+  }
+  // meilleure série dans le périmètre (pour une année passée / 'all')
+  const jP = Object.keys(parJourP).filter(d => parJourP[d] > 0).sort();
+  let meilleureP = jP.length ? 1 : 0, rp = 1;
+  for (let i = 1; i < jP.length; i++) {
+    rp = ((new Date(jP[i]) - new Date(jP[i - 1])) / 86400000 === 1) ? rp + 1 : 1;
+    if (rp > meilleureP) meilleureP = rp;
   }
 
-  const perFormat = {};
-  livres.forEach(l => { perFormat[l.format] = (perFormat[l.format] || 0) + l.totalMinutes; });
+  const topBooks = Object.keys(parLivreP).map(t => ({ titre: t, minutes: parLivreP[t], format: fmtDe[t] || 'Autre' }))
+    .sort((a, b) => b.minutes - a.minutes).slice(0, 8);
 
-  const perWeekday = [0, 0, 0, 0, 0, 0, 0];
-  Object.keys(parJour).forEach(d => { perWeekday[(new Date(d).getDay() + 6) % 7] += parJour[d]; });
-
-  const topBooks = livres.slice().sort((a, b) => b.totalMinutes - a.totalMinutes).slice(0, 8)
-    .map(l => ({ titre: l.titre, minutes: l.totalMinutes, format: l.format }));
-
-  const totalYear = Object.values(parMois).reduce((a, b) => a + b, 0);
-  const debutAnnee = new Date(Date.UTC(year, 0, 1));
+  const totalScope = Object.values(parJourP).reduce((a, b) => a + b, 0);
   const maintenant = new Date(today_());
-  const joursEcoules = year === anneeAujourdhui
-    ? Math.round((maintenant - debutAnnee) / 86400000) + 1
-    : 366;
+  const joursEcoules = tout
+    ? Math.max(1, Object.keys(parAn).length * 365)
+    : (year === anneeAujourdhui
+        ? Math.round((maintenant - new Date(Date.UTC(year, 0, 1))) / 86400000) + 1
+        : 366);
   const r = reglages_();
+  const annees = Object.keys(parAn).sort();
 
   return {
-    year: year,
-    totalYear: totalYear,
+    year: tout ? 'all' : year,
+    scope: tout ? 'Toutes les années' : yStr,
+    annees: annees,
+    totalYear: totalScope,
     totalAll: Object.values(parAn).reduce((a, b) => a + b, 0),
-    perMonth: Array.from({ length: 12 }, (_, i) => parMois[i + 1] || 0),
-    booksFinishedYear: parAnLiv[String(year)] || 0,
+    perMonth: tout
+      ? annees.map(a => parAn[a])                                   // 'all' : une barre par année
+      : Array.from({ length: 12 }, (_, i) => parMois[i + 1] || 0),
+    perMonthLabels: tout ? annees : null,
+    booksFinishedYear: tout ? Object.values(parAnLiv).reduce((a, b) => a + b, 0) : (parAnLiv[yStr] || 0),
     booksFinishedAll: livres.filter(l => l.statut === 'Terminé').length,
     livresEnCours: livres.filter(l => l.statut === 'En cours').length,
     livresEnPause: livres.filter(l => l.statut === 'En pause').length,
-    streakCurrent: (year === anneeAujourdhui) ? courante : 0,
-    streakRecord: record,
-    avgPerDayYear: joursEcoules ? +(totalYear / joursEcoules).toFixed(1) : 0,
-    projectionYear: joursEcoules ? Math.round(totalYear / joursEcoules * 365) : 0,
-    goalYear: toInt_(r.objectif_annuel_min),
-    perFormat: Object.keys(perFormat).map(f => ({ format: f, minutes: perFormat[f] })).sort((a, b) => b.minutes - a.minutes),
-    perWeekday: perWeekday,
+    estAnneeCourante: (!tout && year === anneeAujourdhui),
+    streakCurrent: courante,
+    streakScope: meilleureP,
+    streakRecord: Math.max(record, 1) * (jListe.length ? 1 : 0),
+    avgPerDayYear: joursEcoules ? +(totalScope / joursEcoules).toFixed(1) : 0,
+    projectionYear: (!tout && year === anneeAujourdhui && joursEcoules)
+      ? Math.round(totalScope / joursEcoules * 365) : 0,
+    goalYear: tout ? 0 : toInt_(r.objectif_annuel_min),
+    perFormat: Object.keys(perFmt).map(f => ({ format: f, minutes: perFmt[f] })).sort((a, b) => b.minutes - a.minutes),
+    perWeekday: perWd,
     topBooks: topBooks,
-    perYear: Object.keys(parAn).sort().map(a => ({ year: a, minutes: parAn[a], books: parAnLiv[a] || 0 })),
+    perYear: annees.map(a => ({ year: a, minutes: parAn[a], books: parAnLiv[a] || 0 })),
   };
+}
+function sessionsJoursTous_(sessions) {
+  const j = {};
+  sessions.forEach(s => { j[s.date] = (j[s.date] || 0) + s.min; });
+  Object.keys(j).forEach(k => { if (j[k] <= 0) delete j[k]; });
+  return j;
 }
 
 function getSessions(opts) {
@@ -917,11 +989,11 @@ function _upsertLivre(titre, patch) {
 
   if (!existing) {
     sh.appendRow(rowValues);
-    _resetCaches_();
+    invaliderCache_();
     return sh.getLastRow();
   }
   sh.getRange(existing._row, 1, 1, H_LIVRES.length).setValues([rowValues]);
-  _resetCaches_();
+  invaliderCache_();
   return existing._row;
 }
 
@@ -938,7 +1010,7 @@ function _setFavori_(titre) {
     if (k >= 0 && k < flags.length) flags[k][0] = (normTitre_(r.titre) === cible);
   });
   sh.getRange(2, 6, flags.length, 1).setValues(flags);
-  _resetCaches_();
+  invaliderCache_();
 }
 
 function addSession(p) {
@@ -952,7 +1024,7 @@ function addSession(p) {
     if (minutes <= 0) throw new Error('Durée nulle.');
 
     sh_(CFG.T_SESSIONS).appendRow(['s' + Date.now(), date, livre, minutes, p.source || 'chrono', p.note || '', nowIso_()]);
-    _resetCaches_();
+    invaliderCache_();
 
     const existing = lire_(CFG.T_LIVRES).filter(r => normTitre_(r.titre) === livre)[0];
     const patch = {};
@@ -968,7 +1040,7 @@ function addSession(p) {
 
     if (p.definirChrono) _setFavori_(livre);
 
-    _resetCaches_();
+    invaliderCache_();
     return { ok: true, message: '+' + minutes + ' min · ' + livre, bootstrap: getBootstrap() };
   } finally {
     lock.releaseLock();
@@ -986,7 +1058,7 @@ function updateSession(id, patch) {
       if (patch.minutes != null) row[3] = Math.max(0, Math.round(toNum_(patch.minutes)));
       if (patch.note != null) row[5] = patch.note;
       sh.getRange(i + 1, 1, 1, row.length).setValues([row]);
-      _resetCaches_();
+      invaliderCache_();
       return { ok: true, bootstrap: getBootstrap() };
     }
   }
@@ -999,7 +1071,7 @@ function deleteSession(id) {
   for (let i = vals.length - 1; i >= 1; i--) {
     if (String(vals[i][0]) === String(id)) {
       sh.deleteRow(i + 1);
-      _resetCaches_();
+      invaliderCache_();
       return { ok: true, bootstrap: getBootstrap() };
     }
   }
@@ -1031,7 +1103,7 @@ function saveBook(p) {
     } else if (rowAncien > 0 && rowNouveau > 0 && rowAncien !== rowNouveau) {
       sh_(CFG.T_LIVRES).deleteRow(rowAncien);
     }
-    _resetCaches_();
+    invaliderCache_();
   }
 
   // ne patcher que les champs réellement fournis (ne pas effacer date_fin / note / alias
@@ -1042,7 +1114,7 @@ function saveBook(p) {
   _upsertLivre(nouveau, Object.keys(patch).length ? patch : null);
   if (p.definirChrono) _setFavori_(nouveau);
 
-  _resetCaches_();
+  invaliderCache_();
   return { ok: true, bootstrap: getBootstrap() };
 }
 
@@ -1076,7 +1148,7 @@ function mergeBooks(sources, cible) {
     }
   });
   aSupprimer.sort((a, b) => b - a).forEach(rn => shL.deleteRow(rn));
-  _resetCaches_();
+  invaliderCache_();
 
   // fusionne les alias sur la fiche cible (dédupliqués, cible exclue)
   const rc = _findLivreRow(cible);
@@ -1088,13 +1160,13 @@ function mergeBooks(sources, cible) {
     shL.getRange(rc, 11).setValue(uniq.join(' | '));
   }
 
-  _resetCaches_();
+  invaliderCache_();
   return { ok: true, bootstrap: getBootstrap() };
 }
 
 function setLivreChrono(titre) {
   _setFavori_(titre);
-  _resetCaches_();
+  invaliderCache_();
   return { ok: true, bootstrap: getBootstrap() };
 }
 
@@ -1113,7 +1185,7 @@ function saveReglages(patch) {
     sh.getRange(2, 1, vals.length - 1, 2).setValues(vals.slice(1).map(r => [r[0], r[1]]));
   }
   if (ajouts.length) sh.getRange(vals.length + 1, 1, ajouts.length, 2).setValues(ajouts);
-  _resetCaches_();
+  invaliderCache_();
   return { ok: true, bootstrap: getBootstrap() };
 }
 
@@ -1129,7 +1201,7 @@ function creerLivre(p) {
   _upsertLivre(p.titre, {
     format: p.format, nature: p.nature, statut: p.statut || 'À lire', serie: p.serie || '',
   });
-  _resetCaches_();
+  invaliderCache_();
   return { ok: true, bootstrap: getBootstrap() };
 }
 

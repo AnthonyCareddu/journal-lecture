@@ -1,6 +1,6 @@
 /* Service worker — la coquille est servie RÉSEAU D'ABORD (toujours à jour en ligne),
    le cache ne sert que de secours hors ligne. Les appels API ne passent jamais par ici. */
-const CACHE = 'jdl-shell-v4';
+const CACHE = 'jdl-shell-v5';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/favicon-32.png', './icons/apple-touch-icon.png',

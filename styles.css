@@ -97,6 +97,9 @@ nav.bottom button.on{color:var(--accent)}
 .cell.vert{background:color-mix(in srgb,var(--vert) 26%,var(--card))}
 .cell.jaune{background:color-mix(in srgb,var(--jaune) 30%,var(--card))}
 .cell.rouge{background:color-mix(in srgb,var(--rouge) 26%,var(--card))}
+/* jour sans lecture mais au milieu d'un livre « de fond » en cours */
+.cell.periode{background:repeating-linear-gradient(135deg,var(--zero),var(--zero) 5px,color-mix(in srgb,var(--accent) 8%,var(--zero)) 5px,color-mix(in srgb,var(--accent) 8%,var(--zero)) 10px)}
+.cell.periode .bk{opacity:.5;font-style:italic}
 .cell .fin{position:absolute;top:3px;right:4px;font-size:10px}
 .legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;font-size:11px;color:var(--ink-soft)}
 .legend i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:4px;vertical-align:-1px}
@@ -119,9 +122,10 @@ nav.bottom button.on{color:var(--accent)}
 .bar-row2 .bar-line .bar-track{flex:1}
 .bar-row2 .bar-val{font-size:12px;min-width:40px;text-align:right}
 .mbars{display:flex;gap:3px;align-items:flex-end;height:90px;margin-top:8px}
-.mbars .mb{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.85;cursor:default}
+.mbars .mb{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.7;cursor:pointer;transition:opacity .12s}
+.mbars .mb:active,.mbars .mb.on{opacity:1;outline:2px solid var(--accent);outline-offset:1px}
 .mbars-x{display:flex;gap:3px;margin-top:4px}
-.mbars-x div{flex:1;text-align:center;font-size:9px;color:var(--ink-soft)}
+.mbars-x div{flex:1;text-align:center;font-size:9px;color:var(--ink-soft);overflow:hidden}
 .progress{height:12px;background:var(--zero);border-radius:7px;overflow:hidden;margin-top:8px}
 .progress > i{display:block;height:100%;background:var(--vert);border-radius:7px}
 

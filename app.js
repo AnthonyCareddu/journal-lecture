@@ -4,7 +4,7 @@
  * CONFIG par défaut ci-dessous ; surchargeable via ⚙️ Réglages avancés.
  */
 const DEFAULTS = {
-  API_URL: 'https://script.google.com/macros/s/AKfycbz9FB3JSNRygCu4ZC8uYkvNO7W4nzqPlzCS-hEaHMa5faSARLhzvKD7_0QORUVY_PDh3Q/exec',
+  API_URL: 'https://script.google.com/macros/s/AKfycbxugD51HCt6RhJIzT-X85NlA2Nf6n1mTlLAH4c9mBbh-3NFBjiZlyylcJjW9Dtorb3R4g/exec',
   GOOGLE_CLIENT_ID: '291608936405-ddbgkq5hchqu42n3k92ajo95guokt6vn.apps.googleusercontent.com',
   SHEET_URL: 'https://docs.google.com/spreadsheets/d/1uCvIGRItUcnlIsNZSl7UXlFm2N-h5_V3lt9u3O2cgyo/edit',
 };
@@ -482,10 +482,12 @@ function moisGridLocal(y, m){
     j.minutes += s.minutes;
     j.livres[s.livre] = (j.livres[s.livre]||0) + s.minutes;
   });
-  const finis = {};
+  const finis = {}, spans = [];
   (BOOT.livres || []).forEach(l => {
     const jf = l.fin || l.derniere;
     if(l.statut === 'Terminé' && jf && String(jf).slice(0,7) === mkey) (finis[jf] = finis[jf] || []).push(l.titre);
+    if(l.nature === 'Fond' && l.debut && l.fin && l.debut !== l.fin &&
+       ['En cours','En pause','Terminé'].indexOf(l.statut) >= 0) spans.push({ titre:l.titre, debut:l.debut, fin:l.fin });
   });
   const first = new Date(Date.UTC(y, m-1, 1));
   const dec = (first.getUTCDay()+6)%7;
@@ -500,9 +502,10 @@ function moisGridLocal(y, m){
     else if(jd.minutes >= seuils.g) bucket = 'vert';
     else if(jd.minutes >= seuils.j) bucket = 'jaune';
     else if(jd.minutes >= 1) bucket = 'rouge';
+    const sp = jd.minutes === 0 ? spans.filter(s => iso >= s.debut && iso <= s.fin) : [];
     cells.push({ day:d, date:iso, minutes:jd.minutes, bucket:bucket,
       livres:Object.keys(jd.livres).map(t => ({ titre:t, minutes:jd.livres[t] })).sort((a,b) => b.minutes - a.minutes),
-      finis: finis[iso] || [] });
+      finis: finis[iso] || [], periode: sp.length ? sp[0].titre : '' });
   }
   while(cells.length % 7 !== 0) cells.push(null);
   const tot = Object.keys(jours).reduce((s,k) => s + jours[k].minutes, 0);
@@ -516,8 +519,9 @@ function drawMois(g){
   let h = '';
   g.cells.forEach(c => {
     if(!c){ h += '<div class="cell empty"></div>'; return; }
-    const bk = c.livres[0] ? c.livres[0].titre : '';
-    h += '<div class="cell '+c.bucket+'" onclick="jourDetail(\''+c.date+'\')">'+
+    const enPeriode = !c.minutes && c.periode;
+    const bk = c.livres[0] ? c.livres[0].titre : (enPeriode ? c.periode : '');
+    h += '<div class="cell '+c.bucket+(enPeriode?' periode':'')+'" onclick="jourDetail(\''+c.date+'\')">'+
       (c.finis.length ? '<span class="fin">✓</span>' : '')+
       '<span class="d">'+c.day+'</span>'+
       (bk ? '<span class="bk">'+esc(bk)+'</span>' : '')+
@@ -544,14 +548,25 @@ function jourDetail(date){
 }
 
 /* ================= STATS ================= */
-function statsNav(d){ STA.y += d; renderStats(); }
+function statsAnnees(){
+  const a = (BOOT && BOOT.stats && BOOT.stats.annees) || [];
+  return a.concat(['all']);         // ... 2024, 2025, 2026, all
+}
+function statsNav(d){
+  const list = statsAnnees();
+  let i = list.indexOf(String(STA.y));
+  if(i < 0) i = list.length - 2;                    // défaut : dernière année
+  i = (i + d + list.length) % list.length;
+  STA.y = list[i] === 'all' ? 'all' : +list[i];
+  renderStats();
+}
 function renderStats(){
   const my = ++staReq;
   const an = STA.y;
-  document.getElementById('stats-annee').textContent = an;
+  document.getElementById('stats-annee').textContent = (an === 'all') ? 'Toutes les années' : an;
   const body = document.getElementById('stats-body');
   const anneeCourante = (BOOT && BOOT.anneeCourante) || new Date().getFullYear();
-  const cache = (an === anneeCourante && BOOT && BOOT.stats) ? BOOT.stats : staCache[an];
+  const cache = (an === anneeCourante && BOOT && BOOT.stats && BOOT.stats.year === an) ? BOOT.stats : staCache[an];
   if(cache && cache.year === an) drawStats(cache);       // instantané, jamais la mauvaise année
   else body.innerHTML = '<div class="spin"></div>';
   api('stats', { year: an }).then(s => {
@@ -563,37 +578,62 @@ function renderStats(){
 }
 function drawStats(s){
   const body = document.getElementById('stats-body');
-  {
-    const goalPct = s.goalYear ? Math.min(100, Math.round(s.totalYear/s.goalYear*100)) : 0;
-    const mx = a => Math.max.apply(null, a.concat([1]));
-    const maxM = mx(s.perMonth), maxW = mx(s.perWeekday);
-    const maxF = mx(s.perFormat.map(x=>x.minutes)), maxY = mx(s.perYear.map(x=>x.minutes)), maxB = mx(s.topBooks.map(x=>x.minutes));
-    const JJ = ['L','M','M','J','V','S','D'];
-    body.innerHTML =
-      '<div class="kpis">'+
-        kpi(fmtMin(s.totalYear),'lus en '+s.year) + kpi(s.booksFinishedYear,'livres terminés') +
-        kpi('🔥 '+s.streakCurrent+' j','série en cours') + kpi(s.streakRecord+' j','record')+
-      '</div>'+
+  const tout = (s.year === 'all');
+  const scope = s.scope || String(s.year);
+  const mx = a => Math.max.apply(null, a.concat([1]));
+  const maxM = mx(s.perMonth), maxW = mx(s.perWeekday);
+  const maxF = mx(s.perFormat.map(x=>x.minutes)), maxY = mx(s.perYear.map(x=>x.minutes)), maxB = mx(s.topBooks.map(x=>x.minutes));
+  const JJ = ['L','M','M','J','V','S','D'];
+  const mLabels = s.perMonthLabels || MOIS_NOMS;                 // 'all' -> les années
+  const mNoms   = s.perMonthLabels || MOIS_NOMS;
+
+  const kpiSerie = s.estAnneeCourante
+    ? kpi('🔥 '+s.streakCurrent+' j','série en cours')
+    : kpi((s.streakScope||0)+' j', tout ? 'meilleure série' : 'meilleure série '+scope);
+
+  window._statMois = s.perMonth.map((v,i) => ({ label: mNoms[i], v: v }));
+
+  body.innerHTML =
+    '<div class="kpis">'+
+      kpi(fmtMin(s.totalYear), tout ? 'lus au total' : 'lus en '+scope) +
+      kpi(s.booksFinishedYear,'livres terminés') +
+      kpiSerie + kpi(s.streakRecord+' j','record (tous temps)')+
+    '</div>'+
+    (tout ? '' :
       '<div class="card pad" style="margin-top:12px">'+
         '<div class="row" style="justify-content:space-between"><b>Objectif annuel</b>'+
         '<span class="muted">'+fmtMin(s.totalYear)+' / '+fmtMin(s.goalYear)+'</span></div>'+
-        '<div class="progress"><i style="width:'+goalPct+'%"></i></div>'+
-        '<div class="muted" style="font-size:12px;margin-top:6px">'+s.avgPerDayYear+' min/jour · projection '+fmtMin(s.projectionYear)+'</div>'+
+        '<div class="progress"><i style="width:'+(s.goalYear?Math.min(100,Math.round(s.totalYear/s.goalYear*100)):0)+'%"></i></div>'+
+        '<div class="muted" style="font-size:12px;margin-top:6px">'+s.avgPerDayYear+' min/jour'+
+          (s.projectionYear? ' · projection '+fmtMin(s.projectionYear) : '')+'</div>'+
+      '</div>')+
+    '<div class="card pad" style="margin-top:12px"><b>'+(tout?'Par année':'Par mois')+'</b>'+
+      '<div class="mbars">'+s.perMonth.map((v,i) =>
+        '<div class="mb" style="height:'+(v/maxM*100)+'%" title="'+esc(mNoms[i])+' : '+fmtMin(v)+'" onclick="statMoisTap('+i+')"></div>').join('')+'</div>'+
+      '<div class="mbars-x">'+mLabels.map(n => '<div>'+esc(tout?n:n[0])+'</div>').join('')+'</div>'+
+      '<div id="stat-mois-cap" class="muted" style="text-align:center;font-size:12px;margin-top:6px">'+
+        (function(){ let bi=0; s.perMonth.forEach((v,i)=>{ if(v>s.perMonth[bi]) bi=i; }); return s.perMonth[bi] ? esc(mNoms[bi])+' — '+fmtMin(s.perMonth[bi])+' (meilleur)' : 'appuie sur une barre'; })()+
       '</div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Par mois</b>'+
-        '<div class="mbars">'+s.perMonth.map((v,i) => '<div class="mb" style="height:'+(v/maxM*100)+'%" title="'+MOIS_NOMS[i]+' : '+fmtMin(v)+'"></div>').join('')+'</div>'+
-        '<div class="mbars-x">'+MOIS_NOMS.map(n => '<div>'+n[0]+'</div>').join('')+'</div>'+
-      '</div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Par jour de semaine</b><div class="bars">'+
-        s.perWeekday.map((v,i) => barRow(JJ[i],v,maxW)).join('')+'</div></div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Par format</b><div class="bars2">'+
-        s.perFormat.filter(x=>x.minutes>0).map(x => barRow2(x.format,x.minutes,maxF)).join('')+'</div></div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Top livres (temps)</b><div class="bars2">'+
-        s.topBooks.map(x => barRow2(x.titre,x.minutes,maxB)).join('')+'</div></div>'+
-      '<div class="card pad" style="margin-top:12px"><b>Par année</b><div class="bars2">'+
-        s.perYear.map(x => barRow2(x.year,x.minutes,maxY,x.books+' livre'+(x.books>1?'s':''))).join('')+'</div></div>'+
-      '<p class="muted" style="text-align:center;margin-top:14px;font-size:12px">Total historique : '+fmtMin(s.totalAll)+' · '+s.booksFinishedAll+' livres terminés</p>';
-  }
+    '</div>'+
+    '<div class="card pad" style="margin-top:12px"><b>Par jour de semaine — '+scope+'</b><div class="bars">'+
+      s.perWeekday.map((v,i) => barRow(JJ[i],v,maxW)).join('')+'</div></div>'+
+    '<div class="card pad" style="margin-top:12px"><b>Par format — '+scope+'</b><div class="bars2">'+
+      (s.perFormat.filter(x=>x.minutes>0).length
+        ? s.perFormat.filter(x=>x.minutes>0).map(x => barRow2(x.format,x.minutes,maxF)).join('')
+        : '<p class="muted" style="font-size:13px">Aucune lecture.</p>')+'</div></div>'+
+    '<div class="card pad" style="margin-top:12px"><b>Top livres — '+scope+'</b><div class="bars2">'+
+      (s.topBooks.length
+        ? s.topBooks.map(x => barRow2(x.titre,x.minutes,maxB)).join('')
+        : '<p class="muted" style="font-size:13px">Aucune lecture.</p>')+'</div></div>'+
+    '<div class="card pad" style="margin-top:12px"><b>Par année</b><div class="bars2">'+
+      s.perYear.map(x => barRow2(x.year,x.minutes,maxY,x.books+' livre'+(x.books>1?'s':''))).join('')+'</div></div>'+
+    '<p class="muted" style="text-align:center;margin-top:14px;font-size:12px">Total historique : '+fmtMin(s.totalAll)+' · '+s.booksFinishedAll+' livres terminés</p>';
+}
+function statMoisTap(i){
+  const m = (window._statMois||[])[i]; if(!m) return;
+  const cap = document.getElementById('stat-mois-cap');
+  if(cap) cap.textContent = m.label + ' — ' + fmtMin(m.v);
+  document.querySelectorAll('.mbars .mb').forEach((b,j) => b.classList.toggle('on', j===i));
 }
 function kpi(v,k){ return '<div class="kpi"><div class="v">'+v+'</div><div class="k">'+k+'</div></div>'; }
 function barRow(label,val,max){
