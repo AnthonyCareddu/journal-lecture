@@ -124,7 +124,7 @@ function doPost(e) {
       return jsonOut_({ ok: true, data: login_(body.googleToken) });
     }
     if (body.action === 'ping') {
-      return jsonOut_({ ok: true, data: { rev: '2026-09-cache', now: Date.now() } });
+      if (body.flush) invaliderCache_(); return jsonOut_({ ok: true, data: { rev: '2026-09-dates', now: Date.now(), flushed: !!body.flush } });
     }
     var email = verifierSession_(body.token);          // lève 'unauthorized'
     var data = dispatch_(body.action, body.payload || {}, email);
@@ -255,7 +255,10 @@ function lire_(nom) {
     const o = {};
     for (let j = 0; j < hs.length; j++) {
       if (lean && hs[j] === 'horodatage') continue;
-      o[hs[j]] = r[j];
+      // Sheets convertit "2026-09-03" (tapé via appendRow) en vraie Date : getValues() la rend
+      // à minuit heure de Paris (= 22:00Z l'été), JSON.stringify -> ISO UTC -> parseDate_ lisait
+      // la veille. On fige donc toute Date en 'yyyy-MM-dd' (TZ Paris) dès la lecture.
+      var _c = r[j]; o[hs[j]] = (_c instanceof Date && !isNaN(_c)) ? Utilities.formatDate(_c, CFG.TZ, 'yyyy-MM-dd') : _c;
     }
     if (!lean) o._row = i + 1;
     out.push(o);
